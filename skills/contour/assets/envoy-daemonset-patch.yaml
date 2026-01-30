@@ -1,0 +1,11 @@
+spec:
+  template:
+    spec:
+      containers:
+      - name: shutdown-manager
+        image: localhost/contour:latest
+        imagePullPolicy: Never
+      initContainers:
+      - name: envoy-initconfig
+        image: localhost/contour:latest
+        imagePullPolicy: Never
