@@ -1,6 +1,6 @@
 ---
 name: contour
-description: Contour ingress controller and Envoy proxy development environment setup, testing, and troubleshooting
+description: Contour+kind cluster management (create/delete/setup), run Contour locally against cluster Envoy, development environment setup, custom image builds, debugging, e2e testing
 ---
 
 # Contour Development
@@ -24,21 +24,13 @@ make run-e2e    # End-to-end tests
 
 **Purpose**: Create local Kubernetes cluster for Contour testing and development.
 
-**macOS prerequisite**: `colima start`
-
 ```shell
-kind create cluster --config assets/kind-cluster-config-linux.yaml --name contour # Linux
-# kind create cluster --name contour # macOS
-kubectl cluster-info --context kind-contour
-kubectl apply -f https://projectcontour.io/quickstart/contour.yaml
-kubectl -n projectcontour wait --for=condition=available --timeout=300s deployment/contour
-kubectl -n projectcontour wait --for=condition=ready --timeout=300s pod -l app=envoy
+scripts/setup-cluster.sh
 ```
 
 **Cleanup**:
 ```shell
-kind delete cluster --name contour
-colima stop  # macOS only
+scripts/delete-cluster.sh
 ```
 
 ## Run Contour from Source (Host) + Envoy (Cluster)
@@ -47,37 +39,14 @@ colima stop  # macOS only
 
 Steps 1-3 are one-time setup. Step 4 is repeated for each code change.
 
-### 1. Configure Network Connectivity
-
-**Linux**:
-```shell
-sed "s/REPLACE_ADDRESS_HERE/$(docker network inspect kind | jq -r '.[0].IPAM.Config[0].Gateway')/" assets/contour-endpoints-dev.yaml | kubectl apply -f -
-```
-
-**macOS** (colima/lima host IP: `192.168.5.2`):
-```shell
-sed "s/REPLACE_ADDRESS_HERE/192.168.5.2/" assets/contour-endpoints-dev.yaml | kubectl apply -f -
-```
-
-### 2. Scale Down In-Cluster Contour
+### 1-3. Prepare Cluster for Local Development
 
 ```shell
-kubectl -n projectcontour scale deployment contour --replicas=0
-kubectl -n projectcontour rollout restart daemonset envoy
-kubectl -n projectcontour rollout status daemonset envoy
-```
-
-### 3. Extract TLS Certificates
-
-**macOS**: Use `base64 -D` (not `-d`).
-
-```shell
-kubectl -n projectcontour get secret contourcert -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
-kubectl -n projectcontour get secret contourcert -o jsonpath='{.data.tls\.crt}' | base64 -d > tls.crt
-kubectl -n projectcontour get secret contourcert -o jsonpath='{.data.tls\.key}' | base64 -d > tls.key
+scripts/prepare-for-contour-on-host.sh
 ```
 
 ### 4. Run Contour
+
 
 **CLI**:
 ```shell
@@ -126,6 +95,23 @@ kubectl -n projectcontour rollout status deployment/contour
 kubectl -n projectcontour rollout status daemonset/envoy
 kubectl -n projectcontour get pods -o wide
 kubectl -n projectcontour describe pod -l app=contour | grep Image:
+```
+
+## Test Routing With Echoserver
+
+**Purpose**: Test Contour routing and Envoy configuration with a real upstream service.
+
+Echoserver is already deployed by `setup-cluster.sh`.
+
+Send requests to the echoserver and verify that it responds.
+
+```shell
+# Linux
+http http://echoserver.127-0-0-101.nip.io
+
+# macOS (requires port-forwarding)
+kubectl -n projectcontour port-forward daemonset/envoy 8080:8080
+http localhost:8080 Host:echoserver.127-0-0-101.nip.io
 ```
 
 ## Troubleshooting
