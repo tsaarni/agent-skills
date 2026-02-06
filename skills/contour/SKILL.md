@@ -5,6 +5,21 @@ description: Contour+kind cluster management (create/delete/setup), run Contour 
 
 # Contour Development
 
+## VS Code Setup
+
+Enable `e2e` for `gopls` `buildFlags` so that we can open `e2e` tests without errors and get proper code navigation and completion.
+
+```shell
+mkdir -p .vscode
+cat <<EOF > .vscode/settings.json
+{
+  "go.buildFlags": [
+    "-tags=e2e"
+  ]
+}
+EOF
+```
+
 ## Testing (No Cluster Required)
 
 ```shell
@@ -20,12 +35,19 @@ make checkall   # All of the above (run before commits)
 make run-e2e    # End-to-end tests
 ```
 
+To run specific e2e tests, set the `CONTOUR_E2E_TEST_FOCUS` environment variable to a regex matching the test name.
+For example, to run only tests related to external name services over HTTPS:
+
+```shell
+CONTOUR_E2E_TEST_FOCUS="external name services work over https" make run-e2e
+```
+
 ## Kind Cluster Setup
 
 **Purpose**: Create local Kubernetes cluster for Contour testing and development.
 
 ```shell
-scripts/setup-cluster.sh
+scripts/setup-cluster.sh  # Start Kind cluster with Contour and echoserver deployed
 ```
 
 **Cleanup**:
@@ -37,16 +59,17 @@ scripts/delete-cluster.sh
 
 **Purpose**: Local Contour development with rapid iteration and debugging.
 
-Steps 1-3 are one-time setup. Step 4 is repeated for each code change.
+Step 1 is one-time setup done after `setup-cluster.sh`.
+Step 2 is repeated after each code change.
 
-### 1-3. Prepare Cluster for Local Development
+### 1. Prepare Cluster for Local Development
+
 
 ```shell
-scripts/prepare-for-contour-on-host.sh
+scripts/prepare-for-contour-on-host.sh  # Configures Service/EndpointSlice so Envoy can connect Contour running on host
 ```
 
-### 4. Run Contour
-
+### 2. Run Contour
 
 **CLI**:
 ```shell
@@ -57,14 +80,29 @@ go run github.com/projectcontour/contour/cmd/contour serve \
   --envoy-service-https-port=8443 \
   --contour-cafile=ca.crt \
   --contour-cert-file=tls.crt \
-  --contour-key-file=tls.key
+  --contour-key-file=tls.key \
+  --debug
 ```
 
-**VSCode Debugger**:
+**VS Code Debugger**:
 ```shell
 mkdir -p .vscode
-cp assets/contour-vscode-launch.json .vscode/launch.json
-cp assets/vscode-settings.json .vscode/settings.json
+cat <<EOF > .vscode/launch.json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run contour",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "cwd": "${workspaceRoot}",
+      "program": "cmd/contour",
+      "args": ["serve", "--xds-address=0.0.0.0", "--xds-port=8001", "--envoy-service-http-port=8080", "--envoy-service-https-port=8443", "--contour-cafile=ca.crt", "--contour-cert-file=tls.crt", "--contour-key-file=tls.key", "--debug"]
+    }
+  ]
+}
+EOF
 ```
 Start debug session using `workbench.action.debug.start` command.
 
@@ -72,7 +110,8 @@ Start debug session using `workbench.action.debug.start` command.
 
 **Purpose**: Test Contour changes running fully in-cluster.
 
-Step 1 is repeated for each code change. Steps 2 and 3 are one-time setup.
+Step 1 is repeated for each code change.
+Steps 2 and 3 are one-time setup.
 
 ### 1. Build and Load Image
 
@@ -97,13 +136,12 @@ kubectl -n projectcontour get pods -o wide
 kubectl -n projectcontour describe pod -l app=contour | grep Image:
 ```
 
-## Test Routing With Echoserver
+## Test Traffic With Echoserver
 
 **Purpose**: Test Contour routing and Envoy configuration with a real upstream service.
 
+Use httpie `http` CLI tool instead of `curl` to send requests.
 Echoserver is already deployed by `setup-cluster.sh`.
-
-Send requests to the echoserver and verify that it responds.
 
 ```shell
 # Linux
@@ -113,6 +151,14 @@ http http://echoserver.127-0-0-101.nip.io
 kubectl -n projectcontour port-forward daemonset/envoy 8080:8080
 http localhost:8080 Host:echoserver.127-0-0-101.nip.io
 ```
+
+For load testing and benchmarking, use `echoclient`:
+If you need more advanced traffic profiles than the `echoclient` CLI supports, create custom Go code using the `echoclient` Go API.
+
+```shell
+go run github.com/tsaarni/echoclient/cmd/echoclient@latest get -url http://echoserver.127-0-0-101.nip.io -concurrency 10
+```
+
 
 ## Troubleshooting
 
@@ -243,3 +289,6 @@ cd site && hugo server --disableFastRender  # Starts at http://localhost:1313
 - Envoy Admin REST API: https://www.envoyproxy.io/docs/envoy/latest/operations/admin.html
 - Envoy statistics: https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_conn_man/stats and https://www.envoyproxy.io/docs/envoy/latest/configuration/upstream/cluster_manager/cluster_stats
 - Kind docs: https://kind.sigs.k8s.io/
+- Echoserver docs: https://github.com/tsaarni/echoserver
+- HTTPie docs: https://httpie.io/docs
+- Echoclient docs: https://github.com/tsaarni/echoclient
