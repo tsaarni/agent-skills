@@ -1,5 +1,5 @@
 ---
-name: contour
+name: contour-development
 description: Contour+kind cluster management (create/delete/setup), run Contour locally against cluster Envoy, development environment setup, custom image builds, debugging, e2e testing
 ---
 
@@ -32,15 +32,17 @@ make checkall   # All of the above (run before commits)
 ## Testing (Requires Kind Cluster)
 
 ```shell
-make run-e2e    # End-to-end tests
+CONTOUR_E2E_LOCAL_HOST=127.0.0.101 make run-e2e    # End-to-end tests
 ```
 
 To run specific e2e tests, set the `CONTOUR_E2E_TEST_FOCUS` environment variable to a regex matching the test name.
 For example, to run only tests related to external name services over HTTPS:
 
 ```shell
-CONTOUR_E2E_TEST_FOCUS="external name services work over https" make run-e2e
+CONTOUR_E2E_TEST_FOCUS="external name services work over https" CONTOUR_E2E_LOCAL_HOST=127.0.0.101 make run-e2e
 ```
+
+NOTE: On macOS the address is `127.0.0.1` instead of `127.0.0.101`.
 
 ## Kind Cluster Setup
 
@@ -144,12 +146,7 @@ Use httpie `http` CLI tool instead of `curl` to send requests.
 Echoserver is already deployed by `setup-cluster.sh`.
 
 ```shell
-# Linux
 http http://echoserver.127-0-0-101.nip.io
-
-# macOS (requires port-forwarding)
-kubectl -n projectcontour port-forward daemonset/envoy 8080:8080
-http localhost:8080 Host:echoserver.127-0-0-101.nip.io
 ```
 
 For load testing and benchmarking, use `echoclient`:
@@ -159,6 +156,7 @@ If you need more advanced traffic profiles than the `echoclient` CLI supports, c
 go run github.com/tsaarni/echoclient/cmd/echoclient@latest get -url http://echoserver.127-0-0-101.nip.io -concurrency 10
 ```
 
+NOTE: On macOS the address is `echoserver.127-0-0-1.nip.io` instead of `echoserver.127-0-0-101.nip.io`.
 
 ## Troubleshooting
 

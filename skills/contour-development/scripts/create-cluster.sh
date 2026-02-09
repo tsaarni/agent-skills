@@ -13,11 +13,13 @@ fi
 kind get clusters | grep -q contour && { echo ">>> Cluster 'contour' already exists."; exit 0; }
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  echo ">>> Creating kind cluster 'contour'..."
-  kind create cluster --name contour
+  KIND_LISTEN_ADDRESS="127.0.0.1"
 else
-  echo ">>> Creating kind cluster 'contour'..."
-  cat <<'EOF' | kind create cluster --config - --name contour
+  KIND_LISTEN_ADDRESS="127.0.0.101"
+fi
+
+echo ">>> Creating kind cluster 'contour'..."
+cat <<EOF | kind create cluster --config - --name contour
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -26,12 +28,11 @@ nodes:
   extraPortMappings:
   - containerPort: 80
     hostPort: 80
-    listenAddress: "127.0.0.101"
+    listenAddress: "${KIND_LISTEN_ADDRESS}"
   - containerPort: 443
     hostPort: 443
-    listenAddress: "127.0.0.101"
+    listenAddress: "${KIND_LISTEN_ADDRESS}"
 EOF
-fi
 
 if kubectl -n projectcontour get deployment contour &>/dev/null; then
     echo ">>> Contour already installed."
@@ -41,7 +42,13 @@ fi
 echo ">>> Installing Contour..."
 kubectl apply -f https://projectcontour.io/quickstart/contour.yaml
 echo ">>> Installing echoserver..."
-cat <<'EOF' | kubectl apply -f -
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  ECHOSERVER_FQDN="echoserver.127-0-0-1.nip.io"
+else
+  ECHOSERVER_FQDN="echoserver.127-0-0-101.nip.io"
+fi
+
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -107,7 +114,7 @@ metadata:
   name: echoserver
 spec:
   virtualhost:
-    fqdn: echoserver.127-0-0-101.nip.io
+    fqdn: ${ECHOSERVER_FQDN}
   routes:
     - services:
         - name: echoserver
