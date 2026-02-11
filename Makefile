@@ -31,4 +31,11 @@ install:
 	@mkdir -p "$(HOME)/.copilot/"
 	@cp instructions/copilot-instructions.md "$(HOME)/.copilot/copilot-instructions.md"
 	@echo "Copied Copilot instructions to $(HOME)/.copilot/copilot-instructions.md"
+
+	# Kiro CLI skills
+	@mkdir -p "$(HOME)/.kiro"
+	@rm -rf "$(HOME)/.kiro/skills"
+	@ln -sfn "$(PWD)/skills" "$(HOME)/.kiro/skills"
+	@echo "Linked skills to $(HOME)/.kiro/skills"
+
 	@echo "Done!"

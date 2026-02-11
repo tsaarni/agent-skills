@@ -73,11 +73,12 @@ Directories used by different agents:
 | Agent | Directories |
 |-------|-------------|
 | GitHub Copilot (VS Code) | `~/.config/Code/User/profiles/Default/*.instructions.md`<sup>1</sup> (user)<br>`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md`, `AGENTS.md` (project) |
-| GitHub Copilot (CLI) | `~/.copilot/copilot-instructions.md` (user) |
-| Gemini CLI | `~/.gemini/GEMINI.md` (user)<br>`GEMINI.md` (project, root and subdirectories) |
-| Kiro CLI (Amazon Q) | `~/.kiro/steering/` (user)<br>`.kiro/steering/` (project) |
+| GitHub Copilot (CLI) | `~/.copilot/copilot-instructions.md` (user)<br>`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md`, `AGENTS.md` (project) |
+| Gemini CLI <sup>2</sup> | `~/.gemini/GEMINI.md` (user)<br>`GEMINI.md` (project, root and subdirectories) |
+| Kiro CLI (Amazon Q) | `~/.kiro/steering/` (user)<br>`.kiro/steering/`, `AGENTS.md` (project) |
 
-<sup>1</sup> On macOS, replace `~/.config/Code/User/` with `~/Library/Application Support/Code/User/`
+<sup>1</sup> On macOS, replace `~/.config/Code/User/` with `~/Library/Application Support/Code/User/`<br>
+<sup>2</sup> Gemini CLI can be [configured](https://geminicli.com/docs/cli/gemini-md/#customize-the-context-file-name) to read `AGENTS.md`.
 
 References:
 - [GitHub Copilot Repository Custom Instructions](https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot)
@@ -85,6 +86,7 @@ References:
 - [Use custom instructions in VS Code](https://code.visualstudio.com/docs/copilot/customization/custom-instructions)
 - [Gemini CLI GEMINI.md](https://geminicli.com/docs/cli/gemini-md/)
 - [Kiro Steering](https://kiro.dev/docs/steering/)
+- [AGENTS.md Specification](https://agents.md)
 
 ## Custom Agents
 
