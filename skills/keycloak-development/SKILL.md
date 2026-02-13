@@ -5,29 +5,32 @@ description: Setup and work with Keycloak development environment including buil
 
 # Keycloak Development Environment
 
+## Important Rules You MUST Follow
+
+- Follow the commands and instructions carefully, unless you are asked to do otherwise, or you have specific reason to do otherwise.
+- Always search the documentation before diverging from the instructions.
+
 ## Building Keycloak
 
 ### Full Build
 ```bash
-# Parallel build with mvnd
-mvnd clean install -DskipTestsuite -DskipExamples -DskipTests
+mvnd clean install -DskipTestsuite -DskipExamples -DskipTests # Parallel build with mvnd (faster)
+mvn clean install -DskipTestsuite -DskipExamples -DskipTests # Regular maven build (slower but use if you have issues with mvnd)
 ```
 
 ### Build Single Module
+After editing code, rebuild only affected modules
+
 ```bash
-# After editing code, rebuild only affected module
-mvn install -DskipTests -pl federation/ldap/
-mvn -f model/pom.xml install -DskipTests
-mvn -f js/pom.xml install
-mvn -f themes/pom.xml install
+mvn install -DskipTests -pl federation/ldap/ # Example: after editing LDAP federation provider
 ```
 
 ## Running Keycloak on Command Line
 
 ### Development Mode
 ```bash
-./mvnw -f quarkus/server/pom.xml compile quarkus:dev -Dkc.config.built=true -Dquarkus.args="start-dev -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin"
-./mvnw -f quarkus/server/pom.xml compile quarkus:dev -Dkc.config.built=true -Dquarkus.args="start-dev -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin -Dkc.db=postgres -Dkc.db-url=jdbc:postgresql://localhost/keycloak -Dkc.db-username=keycloak -Dkc.db-password=keycloak"
+./mvnw -f quarkus/server/pom.xml compile quarkus:dev -Dkc.config.built=true -Dquarkus.args="start-dev --db=dev-mem" -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin  # Start with in-memory H2 database (configuration resets on restart)
+./mvnw -f quarkus/server/pom.xml compile quarkus:dev -Dkc.config.built=true -Dquarkus.args="start-dev -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin -Dkc.db=postgres -Dkc.db-url=jdbc:postgresql://localhost/keycloak -Dkc.db-username=keycloak -Dkc.db-password=keycloak" # Requires running docker compose with PostgreSQL container
 ```
 
 ## Debugging in VS Code
@@ -151,9 +154,12 @@ rm ./quarkus/server/target/kc/data/h2/keycloakdb*
 
 ## Test Servers
 
+Use provided docker compose wrapper [./scripts/docker-compose-wrapper.sh](./scripts/docker-compose-wrapper.sh) to start test server containers.
+
 ### PostgreSQL
+
 ```bash
-scripts/docker-compose-wrapper.sh up -d postgres
+./scripts/docker-compose-wrapper.sh up -d postgres
 
 # Connect to PostgreSQL CLI
 docker exec -it keycloak-postgres-1 psql --username=keycloak
@@ -162,7 +168,7 @@ docker exec -it keycloak-postgres-1 psql --username=keycloak
 ### OpenLDAP
 
 ```bash
-scripts/docker-compose-wrapper.sh up -d openldap
+./scripts/docker-compose-wrapper.sh up -d openldap
 ```
 
 
@@ -178,7 +184,7 @@ kind create cluster --config $HOME/work/devenvs/keycloak/configs/kind-cluster-co
 kubectl apply -f https://projectcontour.io/quickstart/contour.yaml
 
 # Deploy PostgreSQL and Keycloak
-kubectl apply -f  $HOME/work/devenvs/keycloak/manifests/postgresql.yaml
+kubectl apply -f $HOME/work/devenvs/keycloak/manifests/postgresql.yaml
 kubectl apply -f $HOME/work/devenvs/keycloak/manifests/keycloak-26.yaml
 
 # Create secrets for certificates

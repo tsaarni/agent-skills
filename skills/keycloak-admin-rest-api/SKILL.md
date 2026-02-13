@@ -5,15 +5,14 @@ description: Interact with Keycloak admin REST API using httpie. Manage realms, 
 
 # Keycloak Admin REST API
 
-Interact with Keycloak admin REST API using httpie.
+## Important Rules You MUST Follow
 
-## Important Rules (must follow)
-
-- Assume Keycloak is already running. Do not check for it or start it unless explicitly asked.
-- If for example realm or user name is required, and they cannot be inferred from the context, use defaults like `master` and examples like `joe` for user name.
-- If user has not spcecified URL for Keycloak, use `http://keycloak.127-0-0-1.nip.io:8080` as default base URL for API requests.
-- Replace `<ADMIN_TOKEN>` with `$(http --form POST http://keycloak.127-0-0-1.nip.io:8080/realms/master/protocol/openid-connect/token username=admin password=admin grant_type=password client_id=admin-cli | jq -r .access_token)`
-- Use `http` command from httpie for making API requests.
+- You will follow the commands and examples in this skill. Do not deviate from the patterns shown here unless the task explicitly requires it.
+- You will assume Keycloak is already running. Do not check for it or start it unless explicitly asked.
+- You will infer names and IDs from the context when possible. For example, if a realm name is required and there is only one realm, you can infer that realm name. If there are multiple realms, you can ask for clarification or use `master` as default.
+- You will use `http://keycloak.127-0-0-1.nip.io:8080` as the default base URL for API requests if the user has not specified a different URL for Keycloak.
+- You will replace `<ADMIN_TOKEN>` with the actual token value obtained from the token endpoint using command `$(http --form POST http://keycloak.127-0-0-1.nip.io:8080/realms/master/protocol/openid-connect/token username=admin password=admin grant_type=password client_id=admin-cli | jq -r .access_token)`.
+- You will use `http` command from httpie for making API requests.
 
 ## URL Structure
 
