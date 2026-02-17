@@ -48,12 +48,20 @@ git commit -sm "release-<CONTOUR_VERSION>: Bump to Envoy <ENVOY_VERSION>"
 
 ## Check for Known Vulnerabilities in Contour Dependencies and Go Version
 
+Source code scanning:
+
 - Get Go version from `Makefile` variable `BUILD_BASE_IMAGE`
 - Create `osv-scanner.toml` with `GoVersionOverride = "<GO_VERSION>"`
 - Run: `osv-scanner scan source -r . --format=json --call-analysis=go --output=osv-results.json`
 - Read `osv-results.json` and summarize severity and most important details for any vulnerabilities found.
 - If no vulnerabilities are found, report "No known vulnerabilities found for Contour dependencies with Go <GO_VERSION>".
 - Delete `osv-scanner.toml`
+
+Container image scanning:
+
+- Run scanner against published container image such as `osv-scanner scan image --format json ghcr.io/projectcontour/contour:<CONTOUR_VERSION>`
+- Read the output and summarize severity and most important details for any vulnerabilities found.
+- If no vulnerabilities are found, report "No known vulnerabilities found for Contour <CONTOUR_VERSION>".
 
 ## Check for Known Vulnerabilities in Envoy
 
