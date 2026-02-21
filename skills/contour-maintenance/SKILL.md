@@ -1,6 +1,6 @@
 ---
 name: contour-maintenance
-description: Contour version bumps (Go, Envoy), dependency updates, and vulnerability checks for release branches
+description: Contour version bumps (Go, Envoy), dependency updates, and vulnerability / CVE checks for release branches and images
 ---
 
 # Contour Maintenance Tasks
@@ -8,7 +8,12 @@ description: Contour version bumps (Go, Envoy), dependency updates, and vulnerab
 **Preconditions:**
 - All tasks must be executed in the root directory of the Contour repository.
 - Learn the GitHub username of the current user by running `gh api user --jq '.login'`
+- Before executing any of the tasks, fetch the latest changes from the remote repository.
 - Execute `git show main:versions.yaml | head -100` to read the latest supported Contour release tracks (e.g., `main`, `1.33`, `1.32`, etc.).
+
+**Do NOT:**
+- You must not use `go.mod` to check the used Go version. Instead, you must read the Go version from the `Makefile` variable `BUILD_BASE_IMAGE`, which contains a reference to the Go version in the format `golang:<GO_VERSION>`.
+- You must not use `version.yaml` from release branches, since it is only updated in `main`.
 
 ## Bump Go Version
 
@@ -46,20 +51,21 @@ git add -u
 git commit -sm "release-<CONTOUR_VERSION>: Bump to Envoy <ENVOY_VERSION>"
 ```
 
-## Check for Known Vulnerabilities in Contour Dependencies and Go Version
+## Check for Known Vulnerabilities in Contour Dependencies and Go Version (scan source code)
 
 Source code scanning:
 
 - Get Go version from `Makefile` variable `BUILD_BASE_IMAGE`
-- Create `osv-scanner.toml` with `GoVersionOverride = "<GO_VERSION>"`
+- Create override `printf "GoVersionOverride = \"%s\"\n" "<GO_VERSION>" > osv-scanner.toml` to set the Go version for the OSV Scanner.
 - Run: `osv-scanner scan source -r . --format=json --call-analysis=go --output=osv-results.json`
 - Read `osv-results.json` and summarize severity and most important details for any vulnerabilities found.
 - If no vulnerabilities are found, report "No known vulnerabilities found for Contour dependencies with Go <GO_VERSION>".
 - Delete `osv-scanner.toml`
 
-Container image scanning:
+## Check for Known Vulnerabilities in Contour Dependencies and Go Version (scan container images)
 
-- Run scanner against published container image such as `osv-scanner scan image --format json ghcr.io/projectcontour/contour:<CONTOUR_VERSION>`
+- Run scanner against published container image `osv-scanner scan image --format json ghcr.io/projectcontour/contour:<CONTOUR_VERSION>`
+- Scan either requested version or all supported versions.
 - Read the output and summarize severity and most important details for any vulnerabilities found.
 - If no vulnerabilities are found, report "No known vulnerabilities found for Contour <CONTOUR_VERSION>".
 
@@ -93,3 +99,7 @@ git checkout -b chore/main/update-k8s-version-<K8S_RELEASE_TRACK>
 git add -u
 git commit -sm "Update Kubernetes version for E2E tests to <K8S_RELEASE_TRACK>"
 ```
+
+## Release Process Instructions
+
+See file `site/content/resources/release-process.md`.
