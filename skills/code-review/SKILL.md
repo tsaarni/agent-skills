@@ -21,7 +21,7 @@ This skill adapts to your environment. Use the tools available to you to accompl
 
 Before beginning the review:
 
-1. **Read project guidelines**: Check for `README.md`, `CONTRIBUTING.md`, or similar files to understand project standards, coding conventions, and architecture.
+1. **Read project guidelines**: Check for `README.md`, `CONTRIBUTING.md`, or similar files to understand project standards, coding conventions, architecture, and changelog/release note requirements.
 2. **Understand scope**: Clarify with the user what aspects are most important to review (e.g., "focus on security", "check API design", "verify test coverage").
 3. **Identify technology stack**: Note the primary languages, frameworks, and tools involved to apply appropriate review criteria.
 
@@ -147,8 +147,11 @@ Apply the following analysis pillars. For each, look for specific patterns and i
 
 ### Additional Considerations
 
-- **Documentation**: Are README/API docs/comments updated to reflect changes?
-- **Dependencies**: Are new dependencies justified? Are they the latest available versions? Any security concerns?
+- **Documentation & Changelogs**:
+  - Are README/API docs/comments updated to reflect changes?
+  - Is the documentation written from a user's perspective and easily understandable?
+  - Does the project have a convention for PRs to update a changelog or release notes? If so, does this change include those updates?
+- **Dependencies**: Are new dependencies justified? Are they the latest available versions? Any concerns?
 - **Scope**: Single feature/fix per PR, or mixed concerns?
 - **Code Review History**: For remote PRs, check existing comments to avoid duplicates.
 
