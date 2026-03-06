@@ -318,10 +318,10 @@ STOP if scan fails with error (not if vulnerabilities found).
 MUST extract vulnerabilities:
 
 ```bash
-VULN_COUNT=$(jq '[.results[].vulnerabilities] | flatten | length' osv-results.json 2>/dev/null || echo "0")
+VULN_COUNT=$(jq '[.results[].packages[].vulnerabilities[].id] | unique | length' osv-results.json 2>/dev/null || echo "0")
 echo "Total vulnerabilities found: $VULN_COUNT"
 
-jq -r '.results[].vulnerabilities[] | "\(.id) - \(.severity) - \(.summary // .description)"' osv-results.json
+jq -r '.results[].packages[].vulnerabilities[] | "\(.id) - \(.summary // .details // "N/A")"' osv-results.json
 ```
 
 MUST capture ALL vulnerability details for reporting.
@@ -398,10 +398,10 @@ if ! jq empty /tmp/osv-image-<VERSION>.json 2>/dev/null; then
   exit 1
 fi
 
-VULN_COUNT=$(jq '.vulnerabilities | length' /tmp/osv-image-<VERSION>.json 2>/dev/null || echo "0")
+VULN_COUNT=$(jq '[.results[].packages[].vulnerabilities[].id] | unique | length' /tmp/osv-image-<VERSION>.json 2>/dev/null || echo "0")
 echo "Version <VERSION>: $VULN_COUNT vulnerabilities"
 
-jq -r '.vulnerabilities[] | "\(.id) - \(.severity) - \(.summary // "N/A")"' /tmp/osv-image-<VERSION>.json
+jq -r '.results[].packages[].vulnerabilities[] | "\(.id) - \(.summary // .details // "N/A")"' /tmp/osv-image-<VERSION>.json
 ```
 
 MUST capture and organize output by version.
@@ -475,11 +475,11 @@ STOP if HTTP request fails with error.
 From the OSV API response, MUST extract:
 ```bash
 # Assuming response stored in variable or file
-VULN_COUNT=$(echo "$RESPONSE" | jq '.vulnerabilities | length' 2>/dev/null)
+VULN_COUNT=$(echo "$RESPONSE" | jq '[.results[].packages[].vulnerabilities[].id] | unique | length' 2>/dev/null)
 echo "Vulnerabilities found: $VULN_COUNT"
 
 # Extract details
-echo "$RESPONSE" | jq -r '.vulnerabilities[] | "\(.id) - \(.severity // "N/A") - \(.summary // .description)"'
+echo "$RESPONSE" | jq -r '.results[].packages[].vulnerabilities[] | "\(.id) - \(.summary // .details // "N/A")"'
 ```
 
 MUST capture all vulnerability details for reporting.
