@@ -104,73 +104,64 @@ Nordix maintains forked branches for specific Keycloak versions with strategic b
    git checkout -b {version}-nordix {version}
    git --no-pager log --oneline -3  # Verify
    ```
-2. **Cherry-pick backports**
+
+### Phase 3: Cherry-pick Backports
+
+1. **Cherry-pick backports**
    ```bash
    git cherry-pick <commit1> <commit2> <commit3> ...
    ```
    - IMPORTANT: the commits must be in chronological order (oldest first)
    - NOTE: `git log` output is in reverse chronological order (newest first), so reverse the list from git log output when cherry-picking
+   - Resolve any conflicts that arise (see Common Scenarios: Conflict Resolution)
 
-### Phase 3: Conflict Resolution
+### Phase 4: Backport Specific Fixes
 
-1. **Try automatic merge strategies first**
-   ```bash
-   git cherry-pick -X ort <commit>
-   ```
+This phase applies to any explicit backport request: a CVE/security fix, a commit hash given directly, or any other targeted patch.
 
-2. **For manual conflict resolution** (when automatic strategies fail)
-   - Review conflict markers to understand changes from both sides
-   - Prefer the incoming commit's logic but preserve any other changes from HEAD
-     - Security fixes must be applied with their intended logic intact
-     - Merge both sides intelligently: keep the security fix's core logic while preserving other HEAD changes
+1. **Locate the commit** to backport
+   - If a commit hash is given directly, skip to step 2
+   - If a CVE ID is given, find the fix commit using these methods in order:
 
-3. **Continue cherry-pick after resolving conflicts**
-   ```bash
-   git add <resolved-files>
-   git rm <deleted-files>  # For delete/modify conflicts, remove the file if it was deleted in HEAD
-   git cherry-pick --continue --no-edit
-   ```
-
-4. **Summarize conflict resolutions**
-   - Describe how conflicts were resolved and why certain changes were kept or discarded
-   - For security fixes: explain how the security fix logic was preserved while merging with other changes
-
-### Phase 4: Backport CVE/Security Fixes
-
-1. **ALWAYS execute first: Search by CVE ID in GitHub advisories**
+   **Method 1: Search GitHub advisories by CVE ID**
    ```bash
    gh api "advisories?cve_id={CVE-XXXX-XXXXX}"
    ```
-   - This is the primary method and should be attempted first
-   - If this returns results, extract the commit ID from the advisory data
+   If results are returned, extract the commit ID from the advisory data.
 
-2. **If Method 1 fails, try alternative methods** to find the fix commit in **upstream** Keycloak repository (origin):
-
-   **Method 2: Search by CVE ID in commit messages**
+   **Method 2: Search commit messages for CVE ID**
    ```bash
-   git log --all --oneline --grep="CVE-XXXX-XXXXX" origin/main
+   git --no-pager log --all --oneline --grep="CVE-XXXX-XXXXX" origin/main
    ```
 
-   **Method 3: Search upstream release notes for security advisories**
+   **Method 3: Search upstream release notes**
    ```bash
    gh release view {upstream-version} --repo keycloak/keycloak
    ```
    Look for security fixes mentioned in the release notes, then search for related commits.
 
-   **Method 4: Search web for CVE details, then find commit by description**
-   - Search the web for the CVE ID to understand what the vulnerability is about
-   - Use the CVE description to search for related commits in the repository:
+   **Method 4: Search by description derived from CVE details**
+   - Look up the CVE to understand what the vulnerability is about
+   - Search commits using keywords from the description:
      ```bash
-     git log --all --oneline --grep="keyword-from-cve-description" origin/main
+     git --no-pager log --all --oneline --grep="keyword-from-cve-description" origin/main
      ```
 
-3. **Once the commit is found**, cherry-pick it onto the nordix branch
+2. **Review the commit before applying**
+   ```bash
+   git show <commit-id>
+   ```
+   - Read the commit message to understand the intent
+   - Review the diff to assess scope and any potential conflicts
+   - Confirm the commit is appropriate for the target nordix branch
+
+3. **Apply the commit**
    ```bash
    git cherry-pick <commit-id>
    ```
-   - Resolve any conflicts carefully
-   - Continue cherry-pick `git cherry-pick --continue`
-   - Summarize the backport of the security fix, including any conflict resolutions
+   - Resolve any conflicts carefully (see Common Scenarios: Conflict Resolution)
+   - Continue cherry-pick after resolving: `git cherry-pick --continue`
+   - Summarize the backport, including the commit reviewed, what it changes, and how any conflicts were resolved
 
 ### Phase 5: Finalization
 
@@ -233,15 +224,29 @@ git cherry-pick commit1 commit2 commit3
 git tag 26.2.14-nordix-1
 ```
 
-### Scenario 2: Handling Merge Conflict
-```bash
-git cherry-pick <commit-with-conflict>
-# Conflicts detected - resolve them
-git diff  # Review conflicts
-# Edit files to resolve
-git add <files>
-git cherry-pick --continue
-```
+### Scenario 2: Conflict Resolution
+
+1. **Try automatic merge strategies first**
+   ```bash
+   git cherry-pick -X ort <commit>
+   ```
+
+2. **For manual conflict resolution** (when automatic strategies fail)
+   - Review conflict markers to understand changes from both sides
+   - Prefer the incoming commit's logic but preserve any other changes from HEAD
+     - Security fixes must be applied with their intended logic intact
+     - Merge both sides intelligently: keep the security fix's core logic while preserving other HEAD changes
+
+3. **Continue cherry-pick after resolving conflicts**
+   ```bash
+   git add <resolved-files>
+   git rm <deleted-files>  # For delete/modify conflicts, remove the file if it was deleted in HEAD
+   git cherry-pick --continue --no-edit
+   ```
+
+4. **Summarize conflict resolutions**
+   - Describe how conflicts were resolved and why certain changes were kept or discarded
+   - For security fixes: explain how the security fix logic was preserved while merging with other changes
 
 
 ## References
