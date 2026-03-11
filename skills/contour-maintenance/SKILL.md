@@ -142,7 +142,7 @@ New Go Version: ${NEW_GO_VERSION}
 Branch Created: chore/release-<CONTOUR_VERSION>/bump-go-${NEW_GO_VERSION}
 
 Next: Push branch and create pull request:
-  git push origin chore/release-<CONTOUR_VERSION>/bump-go-${NEW_GO_VERSION}
+  git push nordix chore/release-<CONTOUR_VERSION>/bump-go-${NEW_GO_VERSION}
 ```
 
 ---
