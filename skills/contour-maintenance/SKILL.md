@@ -122,7 +122,7 @@ Expected: Branch name matches `chore/release-<CONTOUR_VERSION>/bump-go-<VERSION>
 THEN execute:
 ```bash
 git add -u
-git commit -m "release-<CONTOUR_VERSION>: Bump to go $NEW_GO_VERSION"
+git commit -sm "release-<CONTOUR_VERSION>: Bump to go $NEW_GO_VERSION"
 ```
 
 MUST verify commit created:
