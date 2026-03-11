@@ -220,7 +220,7 @@ Expected: Branch name matches `chore/release-<CONTOUR_VERSION>/bump-envoy-<VERSI
 THEN execute:
 ```bash
 git add -u
-git commit -m "release-<CONTOUR_VERSION>: Bump to Envoy ${NEW_ENVOY_VERSION}"
+git commit -sm "release-<CONTOUR_VERSION>: Bump to Envoy ${NEW_ENVOY_VERSION}"
 ```
 
 MUST verify commit created:
@@ -240,7 +240,7 @@ New Envoy Version: ${NEW_ENVOY_VERSION}
 Branch Created: chore/release-<CONTOUR_VERSION>/bump-envoy-${NEW_ENVOY_VERSION}
 
 Next: Push branch and create pull request:
-  git push origin chore/release-<CONTOUR_VERSION>/bump-envoy-${NEW_ENVOY_VERSION}
+  git push nordix chore/release-<CONTOUR_VERSION>/bump-envoy-${NEW_ENVOY_VERSION}
 ```
 
 ---
@@ -669,7 +669,7 @@ Expected: All files from Steps 4-9 showing as modified.
 MUST execute:
 ```bash
 git add -u
-git commit -m "Update Kubernetes version for E2E tests to ${K8S_RELEASE_TRACK}"
+git commit -sm "Update Kubernetes version for E2E tests to ${K8S_RELEASE_TRACK}"
 ```
 
 Verify:
