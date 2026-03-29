@@ -1,0 +1,2 @@
+#!/bin/bash
+exec uv run --project "$(dirname "$0")" gh-ci-analyzer "$@"

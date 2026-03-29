@@ -1,0 +1,31 @@
+<code_context>
+<files>
+{% for file in changed_files %}
+{% if file.ranges %}
+<file path="{{ file.path }}">
+{% for range in file.ranges %}
+### Range: {% if range.name %}{{ range.name }}{% else %}Anonymous{% endif %} (Lines {{ range.start_line }}-{{ range.end_line }})
+```go
+{{ range.content }}
+```
+{% endfor %}
+</file>
+{% endif %}
+{% endfor %}
+</files>
+
+{% if impact_scope %}
+<impact_analysis>
+{% for br in impact_scope %}
+### Usages of `{{ br.identifier }}` (Modified in `{{ br.modified_file }}`)
+{% for usage in br.usages[:5] -%}
+- `{{ usage.file_path }}:{{ usage.line_number }}` : {{ usage.content }}
+{% endfor -%}
+{% if br.usages|length > 5 -%}
+*(...and {{ br.usages|length - 5 }} more usages omitted)*
+{% endif -%}
+{% endfor %}
+</impact_analysis>
+{% endif %}
+</code_context>
+
