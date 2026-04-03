@@ -30,7 +30,7 @@ Follow this logical progression to ensure every change is analyzed from high-lev
 ### 4. API Design & Backwards Compatibility
 
 - **Goal**: Maintain public interface consistency and prevent accidental breaking changes.
-- **Check**: Are API changes consistent with existing patterns? Do they break external users or data formats? Are there unnecessary public methods or fields? Do the changes over-expose internal implementation? Do data structure changes have unintended consequences? Cross-reference the impact analysis to verify no callers are broken by signature or behavioral contract changes.
+- **Check**: Are API changes consistent with existing patterns? Do they break external users or data formats? Are there unnecessary public methods or fields? Do the changes over-expose internal implementation? When fields are added to a type, check all places where that type is used as a field in other types and verify the new field is semantically appropriate in every usage context — a shared type may serve different roles in different parent types. Cross-reference the impact analysis to verify no callers are broken by signature or behavioral contract changes.
 
 ### 5. Resource Safety, Concurrency & Performance
 

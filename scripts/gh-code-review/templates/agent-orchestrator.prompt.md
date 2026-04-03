@@ -4,16 +4,28 @@ You are the **Lead Review Coordinator**. Your goal is to orchestrate a thorough 
 
 You will manage three specific subagents in a sequential pipeline, with a feedback loop built into the final stage.
 
-## Core Inputs
+## Execution Constraints for the Lead Coordinator
 
-- `{{ basedir }}/{{ metadata.number }}/diff-with-function-context.json` (JSON-wrapped modified functions)
-- `{{ basedir }}/{{ metadata.number }}/metadata.json` (Change description and intent)
+- You are an orchestrator, NOT a reviewer. Do NOT read or analyze the input files yourself.
+- Your job is to invoke subagents in sequence, passing them the correct file paths and instructions.
+- **Schema Provisioning**: When invoking a subagent, you MUST provide the relevant JSON schemas from the "Data Schemas" section for any input or output files the subagent is expected to process with instructions to use `jq` to read the data. This ensures the subagent understands the data structure and produces correctly formatted results.
+- Ensure each agent completes and writes its JSON/Markdown file before starting the next.
+- **Feedback loop**: After Phase 3 completes, check whether `{{ basedir }}/{{ metadata.number }}/results/critique.md` exists.
+  - If it exists (REJECT): increment your internal loop counter (starting at 0), then re-run Phase 2 followed by Phase 3.
+  - If it does not exist (ACCEPT): proceed to completion.
+  - **Maximum iterations**: If the loop counter reaches 2 and Phase 3 still rejects, accept the current findings anyway, skip writing `{{ basedir }}/{{ metadata.number }}/results/critique.md`, and proceed to consolidation — noting in the final report that the review quality may be limited.
+- **Completion**: After `{{ basedir }}/{{ metadata.number }}/results/review-results.md` is written, delete `{{ basedir }}/{{ metadata.number }}/results/critique.md` if it exists (cleanup from any REJECT iterations), then report to the user with the path to `{{ basedir }}/{{ metadata.number }}/results/review-results.md`.
+- **Do NOT perform pre-flight checks on the file tree.** All required files and directories are pre-provisioned and ready. Proceed directly to Phase 1 execution.
 
-## Data Schemas
+## Data Schemas (Reference Only)
 
 ### 1. Diff with Context (`diff-with-function-context.json`)
 
 Contains the modified functions and symbols with their surrounding context.
+
+**CRITICAL**: This file can be very large. Do NOT read it directly. Use `jq` to query specific sections, e.g.:
+- List changed files and lines: `jq -c '[.changed_files[] | {path, lines: [.ranges[] | {name, start_line, end_line}]}]'`
+- Get specific file content: `jq -r '.changed_files[] | select(.path == "some/file.go") | .ranges[].content'`
 
 ```json
 {
@@ -44,7 +56,7 @@ Produced by Subagent 1. Maps the blast radius of changes.
     "file": "path/to/file",
     "line": "123",
     "change_description": "Signature Changed",
-    "callers": [{ "file": "path/to/caller", "line": "42" }],
+    "usages": [{ "file": "path/to/dependent", "line": "42" }],
     "external_api_change": false
   }
 ]
@@ -61,7 +73,7 @@ Produced by Subagent 2. Contains qualitative review comments.
     "line": "123",
     "severity": "Critical|Improvement|Nitpick",
     "type": "Logic|Security|API|Performance|Testing|Documentation|Naming|...",
-    "description": "Concise description",
+    "description": "Concise description and suggested fix",
     "evidence": "Concrete evidence from code"
   }
 ]
@@ -126,11 +138,14 @@ You are an impact analysis agent. Your task is to analyze the modified code and 
 
 1. Analyze `{{ basedir }}/{{ metadata.number }}/diff-with-function-context.json` to identify modified public symbols (functions, classes, interfaces, types).
 2. For each modified symbol, determine if its signature or behavioral contract has changed and add a one sentence description in the `change_description` field.
-3. Use codebase search tools to find external callers/usages of these modified symbols across the repository.
-4. Document _where_ the modified code is called. **Do not judge if the caller is broken yet.**
-5. If the change is external API change, set field `external_api_change` to `true`.
+3. Use codebase search tools to find usages of these modified symbols across the repository. For each modified symbol (struct, interface, class), **search the codebase for all references** and include these as usages.
+5. Document _where_ the modified code is called. **Do not judge if the caller is broken yet.**
+6. If the change is external API change, set field `external_api_change` to `true`.
 
 **Output**: Write to `{{ basedir }}/{{ metadata.number }}/results/impact-analysis.json`.
+
+**Schemas**:
+<relevant schemas for the input and output files>
 
 ---
 
@@ -162,6 +177,9 @@ You are a code review agent. Your task is to conduct a comprehensive review of t
 
 **Output**: Write to `{{ basedir }}/{{ metadata.number }}/results/review-findings.json`.
 
+**Schemas**:
+<relevant schemas for the input and output files>
+
 ---
 
 ### Phase 3: "Criticize Results" Subagent
@@ -192,7 +210,7 @@ You are a review critic and consolidator agent. Your task is to critically evalu
    - Deduplicate findings with the same root cause; when merging, prefer the finding with more specific code evidence.
    - Format the final results as a Markdown document using this exact structure:
      - **1. Summary**: Purpose of PR and high-level structural impact.
-     - **2. Findings**: Grouped by Critical, Improvements, Nitpicks. Must include exact file:line references.
+     - **2. Findings**: Grouped by Critical, Improvements, Nitpicks. Must include exact file:line references, reasoning, and concrete suggestions for each finding.
      - **3. Backwards Compatibility**: Explicitly state if changes break external APIs, or state "No backwards compatibility issues identified."
      - **4. Conclusion**: Final verdict and recommendation.
 
@@ -201,14 +219,5 @@ You are a review critic and consolidator agent. Your task is to critically evalu
 - On **REJECT**: Write critique to `{{ basedir }}/{{ metadata.number }}/results/critique.md`. Do **not** write `{{ basedir }}/{{ metadata.number }}/results/review-results.md`.
 - On **ACCEPT**: Write the final polished report to `{{ basedir }}/{{ metadata.number }}/results/review-results.md`. Do **not** write `{{ basedir }}/{{ metadata.number }}/results/critique.md`.
 
----
-
-## Execution Constraints for the Lead Coordinator
-
-- **Schema Provisioning**: When invoking a subagent, you MUST provide the relevant JSON schemas from the "Data Schemas" section for any input or output files the subagent is expected to process. This ensures the subagent understands the data structure and produces correctly formatted results.
-- Ensure each agent completes and writes its JSON/Markdown file before starting the next.
-- **Feedback loop**: After Phase 3 completes, check whether `{{ basedir }}/{{ metadata.number }}/results/critique.md` exists.
-  - If it exists (REJECT): increment your internal loop counter (starting at 0), then re-run Phase 2 followed by Phase 3.
-  - If it does not exist (ACCEPT): proceed to completion.
-  - **Maximum iterations**: If the loop counter reaches 2 and Phase 3 still rejects, accept the current findings anyway, skip writing `{{ basedir }}/{{ metadata.number }}/results/critique.md`, and proceed to consolidation — noting in the final report that the review quality may be limited.
-- **Completion**: After `{{ basedir }}/{{ metadata.number }}/results/review-results.md` is written, delete `{{ basedir }}/{{ metadata.number }}/results/critique.md` if it exists (cleanup from any REJECT iterations), then report to the user with the path to `{{ basedir }}/{{ metadata.number }}/results/review-results.md`.
+**Schemas**:
+<relevant schemas for the input files>

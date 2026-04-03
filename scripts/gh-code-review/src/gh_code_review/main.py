@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import glob
 import argparse
 import logging
 import subprocess
@@ -127,18 +128,14 @@ def prepare_output_dir(dest_dir, pr_id):
 
 
 def write_results(output_dir, diff_content, metadata, contexts, dest_dir, template_dir):
-    pr_diff_path = os.path.join(output_dir, "pr.diff")
-    with open(pr_diff_path, "w", encoding="utf-8") as f:
+    with open(os.path.join(output_dir, "pr.diff"), "w", encoding="utf-8") as f:
         f.write(diff_content.strip())
-    written_files = [pr_diff_path]
 
     metadata_file = None
     if metadata:
         metadata_file = "metadata.json"
-        metadata_path = os.path.join(output_dir, metadata_file)
-        with open(metadata_path, "w", encoding="utf-8") as f:
+        with open(os.path.join(output_dir, metadata_file), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
-        written_files.append(metadata_path)
 
     changed_files_context = []
     for file_path, extracted in contexts.items():
@@ -157,20 +154,19 @@ def write_results(output_dir, diff_content, metadata, contexts, dest_dir, templa
     )
 
     # Render diff-with-function-context.json
-    diff_with_function_context_json = context.render(template_dir, "diff-with-function-context.json")
-    diff_with_function_context_json_path = os.path.join(output_dir, "diff-with-function-context.json")
-    with open(diff_with_function_context_json_path, "w", encoding="utf-8") as f:
-        f.write(diff_with_function_context_json)
-    written_files.append(diff_with_function_context_json_path)
+    with open(os.path.join(output_dir, "diff-with-function-context.json"), "w", encoding="utf-8") as f:
+        f.write(context.render(template_dir, "diff-with-function-context.json"))
+
+    # Render review prompt
+    with open(os.path.join(dest_dir, "review.prompt.md"), "w", encoding="utf-8") as f:
+        f.write(context.render(template_dir, "review.prompt.md"))
 
     # Render agentic orchestrator prompt
-    agent_orchestrator = context.render(template_dir, "agent-orchestrator.prompt.md")
     agent_orchestrator_path = os.path.join(output_dir, "agent-orchestrator.prompt.md")
     with open(agent_orchestrator_path, "w", encoding="utf-8") as f:
-        f.write(agent_orchestrator)
-    written_files.append(agent_orchestrator_path)
+        f.write(context.render(template_dir, "agent-orchestrator.prompt.md"))
 
-    return written_files, agent_orchestrator_path
+    return agent_orchestrator_path
 
 
 def main():
@@ -203,14 +199,15 @@ def main():
     project_root = os.path.dirname(os.path.dirname(package_root))
     template_dir = os.path.join(project_root, "templates")
 
-    written_files, agent_orchestrator_path = write_results(
+    agent_orchestrator_path = write_results(
         output_dir, diff_content, metadata, contexts, args.dest_dir, template_dir
     )
 
-    rel_output_dir = os.path.relpath(output_dir, os.getcwd())
-    print(f"\nSuccess! Review context saved to: {rel_output_dir}")
-    for fpath in written_files:
-        print(f"  - {os.path.relpath(fpath, os.getcwd())}")
+    rel_dest_dir = os.path.relpath(args.dest_dir, os.getcwd())
+    print(f"\nSuccess! Review context saved to: {rel_dest_dir}")
+    for fpath in sorted(glob.glob(os.path.join(args.dest_dir, "**"), recursive=True)):
+        if os.path.isfile(fpath):
+            print(f"  - {os.path.relpath(fpath, os.getcwd())}")
 
     rel_orchestrator_path = os.path.relpath(agent_orchestrator_path, os.getcwd())
     print("\nTo start the review, run:")
