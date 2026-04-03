@@ -1,0 +1,31 @@
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[project]
+name = "gh-code-review"
+version = "0.1.0"
+description = "Deterministic Code Review Assistant"
+readme = "README.md"
+authors = [
+    { name = "Tero Saarni", email = "tero.saarni@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "jinja2>=3.1.6",
+    "unidiff>=0.7.5",
+]
+
+[project.scripts]
+gh-code-review = "gh_code_review.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.15.9",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

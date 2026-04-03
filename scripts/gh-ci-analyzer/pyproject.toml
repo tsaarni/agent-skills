@@ -1,0 +1,25 @@
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[project]
+name = "gh-ci-analyzer"
+version = "0.1.0"
+description = "Analyzes failed CI workflows for a GitHub PR."
+readme = "README.md"
+authors = [
+    { name = "Tero Saarni", email = "tero.saarni@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "jinja2>=3.1.0",
+]
+
+[project.scripts]
+gh-ci-analyze = "gh_ci_analyzer.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
