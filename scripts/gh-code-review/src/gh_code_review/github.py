@@ -1,52 +1,64 @@
 import json
 import logging
-import re
 import subprocess
-import sys
 from typing import Optional
 
 
-def fetch_pr_diff(repo: str, pr_number: int) -> str:
-    """Fetches the unified diff of a GitHub Pull Request using the gh CLI."""
-    cmd = ["gh", "pr", "diff", str(pr_number), "--repo", repo]
-    logging.debug(f"Executing command: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return result.stdout
+
+class GitHubError(Exception):
+    """Custom exception for GitHub-related errors."""
+    pass
 
 
-def fetch_pr_metadata(repo: str, pr_number: int) -> dict:
-    """Fetches PR metadata (title, body, comments, review thread comments) using GitHub GraphQL via gh CLI."""
-    owner, name = repo.split("/")
+def fetch_pr_metadata(repo: str, pr_number: Optional[int] = None, branch_name: Optional[str] = None) -> dict:
+    """
+    Fetches PR metadata using a single GraphQL search query.
+    Can search by PR number or by branch name.
+    """
+    if "/" not in repo or len(repo.split("/")) != 2:
+        raise GitHubError(f"Invalid repository format '{repo}'. Expected 'owner/repo'.")
+
+    if pr_number:
+        search_query = f"repo:{repo} is:pr {pr_number}"
+    elif branch_name:
+        search_query = f"repo:{repo} is:pr is:open head:{branch_name}"
+    else:
+        raise GitHubError("Either pr_number or branch_name must be provided.")
+
     query = """
-    query($owner: String!, $repo: String!, $pr: Int!) {
-      repository(owner: $owner, name: $repo) {
-        pullRequest(number: $pr) {
-          number
-          url
-          title
-          body
-          author { login }
-          comments(first: 50) {
-            nodes {
-              author { login }
-              body
+    query($searchQuery: String!) {
+      search(query: $searchQuery, type: ISSUE, first: 1) {
+        nodes {
+          ... on PullRequest {
+            number
+            url
+            title
+            body
+            baseRefName
+            headRefName
+            author { login }
+            comments(first: 50) {
+              nodes {
+                author { login }
+                body
+              }
             }
-          }
-          reviewThreads(first: 50) {
-            nodes {
-              path
-              isResolved
-              comments(first: 20) {
-                nodes {
-                  author { login }
-                  body
-                  diffHunk
-                  position
-                  originalPosition
-                  line
-                  startLine
-                  originalLine
-                  originalStartLine
+            reviewThreads(first: 50) {
+              nodes {
+                path
+                isResolved
+                comments(first: 20) {
+                  nodes {
+                    author { login }
+                    body
+                    diffHunk
+                    position
+                    originalPosition
+                    line
+                    startLine
+                    originalLine
+                    originalStartLine
+                  }
                 }
               }
             }
@@ -59,28 +71,26 @@ def fetch_pr_metadata(repo: str, pr_number: int) -> dict:
         "gh",
         "api",
         "graphql",
-        "-F",
-        f"owner={owner}",
-        "-F",
-        f"repo={name}",
-        "-F",
-        f"pr={pr_number}",
         "-f",
         f"query={query}",
+        "-F",
+        f"searchQuery={search_query}",
     ]
     logging.debug(f"Executing command: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     data = json.loads(result.stdout)
+    
     if "errors" in data:
-        logging.error(f"Error fetching GraphQL data: {data['errors']}")
-        sys.exit(1)
+        raise GitHubError(f"Error fetching GraphQL data: {data['errors']}")
 
-    pr_data = data.get("data", {}).get("repository", {}).get("pullRequest")
-    if pr_data is None:
-        logging.error(f"Error: PR #{pr_number} not found in {repo}.")
-        sys.exit(1)
+    nodes = data.get("data", {}).get("search", {}).get("nodes", [])
+    if not nodes:
+        if pr_number:
+            raise GitHubError(f"PR #{pr_number} not found in {repo}.")
+        else:
+            raise GitHubError(f"No open PR found for branch '{branch_name}' in {repo}.")
 
-    return pr_data
+    return nodes[0]
 
 
 def get_repo_name(dir_path: str) -> Optional[str]:
@@ -92,76 +102,6 @@ def get_repo_name(dir_path: str) -> Optional[str]:
             cmd, cwd=dir_path, capture_output=True, text=True, check=True
         )
         return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        logging.debug(f"gh repo view failed: {e.stderr}")
+    except Exception as e:
+        logging.debug(f"gh repo view failed: {e}")
         return None
-
-
-def get_current_pr_number(dir_path: str) -> Optional[int]:
-    """Detects the PR number associated with the currently checked out branch."""
-    # Method 1: gh pr view (most direct)
-    try:
-        cmd = ["gh", "pr", "view", "--json", "number", "-q", ".number"]
-        logging.debug(f"Executing command: {' '.join(cmd)} in {dir_path}")
-        result = subprocess.run(
-            cmd, cwd=dir_path, capture_output=True, text=True, check=True
-        )
-        num = result.stdout.strip()
-        if num:
-            return int(num)
-    except Exception as e:
-        logging.debug(f"gh pr view failed: {e}")
-
-    # Method 2: gh pr status (sometimes more reliable for current branch)
-    try:
-        cmd = ["gh", "pr", "status", "--json", "number", "-q", ".currentBranch.number"]
-        logging.debug(f"Executing command: {' '.join(cmd)} in {dir_path}")
-        result = subprocess.run(
-            cmd, cwd=dir_path, capture_output=True, text=True, check=True
-        )
-        num = result.stdout.strip()
-        if num:
-            return int(num)
-    except Exception as e:
-        logging.debug(f"gh pr status failed: {e}")
-
-    # Method 3: gh pr list (search for PR matching current branch)
-    try:
-        cmd_branch = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
-        branch = subprocess.run(
-            cmd_branch, cwd=dir_path, capture_output=True, text=True, check=True
-        ).stdout.strip()
-
-        cmd_list = [
-            "gh",
-            "pr",
-            "list",
-            "--json",
-            "number,headRefName",
-            "-q",
-            f'.[] | select(.headRefName == "{branch}") | .number',
-        ]
-        logging.debug(f"Executing command: {' '.join(cmd_list)} in {dir_path}")
-        result = subprocess.run(
-            cmd_list, cwd=dir_path, capture_output=True, text=True, check=True
-        )
-        num = result.stdout.strip()
-        if num:
-            return int(num)
-    except Exception as e:
-        logging.debug(f"gh pr list fallback failed: {e}")
-
-    # Method 4: Parse branch name if it follows 'pr/123' pattern (common for gh pr checkout)
-    try:
-        cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
-        result = subprocess.run(
-            cmd, cwd=dir_path, capture_output=True, text=True, check=True
-        )
-        branch = result.stdout.strip()
-        match = re.search(r"pr/(\d+)", branch)
-        if match:
-            return int(match.group(1))
-    except Exception as e:
-        logging.debug(f"git branch detection failed: {e}")
-
-    return None

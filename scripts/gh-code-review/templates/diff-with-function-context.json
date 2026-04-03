@@ -1,0 +1,19 @@
+{
+  "changed_files": [
+    {% for file in changed_files %}
+    {
+      "path": {{ file.path | tojson }},
+      "ranges": [
+        {% for range in file.ranges %}
+        {
+          "name": {{ range.name | tojson if range.name else "Anonymous" | tojson }},
+          "start_line": {{ range.start_line }},
+          "end_line": {{ range.end_line }},
+          "content": {{ range.content | tojson }}
+        }{% if not loop.last %},{% endif %}
+        {% endfor %}
+      ]
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+  ]
+}
