@@ -4,14 +4,13 @@ import argparse
 import logging
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from jinja2 import Environment, FileSystemLoader, PackageLoader, StrictUndefined
 
 from .collector import AnalysisContext, build_template_context, collect
 from .gh import run_gh
 
-PACKAGE_DIR = Path(__file__).resolve().parent
-DEFAULT_TEMPLATE_DIR = PACKAGE_DIR.parent.parent.parent / "templates"
 DEFAULT_TEMPLATE_NAME = "analyze.prompt.md"
+DEFAULT_TEMPLATE_PACKAGE_PATH = "templates"
 
 
 def _detect_repo() -> str:
@@ -42,12 +41,13 @@ def render_template(template_context, template_path: Path | None = None) -> str:
     if template_path:
         template_dir = template_path.parent
         template_name = template_path.name
+        loader = FileSystemLoader(template_dir)
     else:
-        template_dir = DEFAULT_TEMPLATE_DIR
         template_name = DEFAULT_TEMPLATE_NAME
+        loader = PackageLoader("gh_ci_analyzer", DEFAULT_TEMPLATE_PACKAGE_PATH)
 
     env = Environment(
-        loader=FileSystemLoader(template_dir),
+        loader=loader,
         keep_trailing_newline=True,
         undefined=StrictUndefined,
     )
