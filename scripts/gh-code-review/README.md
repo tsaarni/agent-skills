@@ -7,14 +7,6 @@ A tool to generate context-rich prompts for agent code reviews by combining PR m
 - [gh](https://cli.github.com/) CLI, authenticated
 - [uv](https://docs.astral.sh/uv/)
 
-## Installation
-
-Install the tool using `uv`:
-
-```bash
-uv tool install --editable .
-```
-
 ## Usage
 
 1. **Check out the PR branch** you wish to review:
@@ -26,7 +18,7 @@ uv tool install --editable .
 2. **Run the tool** from within the repository:
 
    ```bash
-   gh-code-review
+   path/to/gh-code-review
    ```
 
    The script automatically detects the current repository and PR number. Run `gh-code-review --help` for more options.

@@ -8,14 +8,6 @@ Leverages the `gh` CLI to retrieve PR metadata, diffs, logs, and base branch fai
 - [gh](https://cli.github.com/) CLI, authenticated
 - [uv](https://docs.astral.sh/uv/)
 
-## Installation
-
-Install the tool using `uv`:
-
-```bash
-uv tool install --editable . 
-```
-
 ## Usage
 
 1. **Check out the PR branch** you wish to analyze:
@@ -25,7 +17,7 @@ uv tool install --editable .
 
 2. **Run the tool** from within the repository:
    ```bash
-   gh-ci-analyze
+   path/to/gh-ci-analyze
    ```
    The script automatically detects the current repository and PR number. Run `gh-ci-analyze --help` for more options.
 
