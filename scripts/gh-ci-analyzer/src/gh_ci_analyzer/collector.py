@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .gh import gh_json, make_cwd_relative, run_gh, sanitize, write_json
-from .models import FailedRun, RunLog, TemplateContext
+from .models import FailedRun, RecentFailedRun, RecentTemplateContext, RunLog, TemplateContext
 
 RUN_ID_RE = re.compile(r"actions/runs/(\d+)")
 logger = logging.getLogger(__name__)
@@ -276,7 +276,7 @@ def build_template_context(ctx: AnalysisContext) -> TemplateContext:
         # Find logs: one .txt file per failed job
         log_files = sorted(p for p in run_dir.glob("*.txt") if p.stat().st_size > 0)
         logs = [
-            RunLog(path=make_cwd_relative(p), size_kb=p.stat().st_size // 1024)
+            RunLog(path=make_cwd_relative(p), size_bytes=p.stat().st_size)
             for p in log_files
         ]
         # Read failed job names from saved jobs.json
@@ -302,5 +302,134 @@ def build_template_context(ctx: AnalysisContext) -> TemplateContext:
         base_branch=ctx.base_branch,
         head_sha=ctx.head_sha,
         basedir=make_cwd_relative(ctx.prdir.parent),
+        failed_runs=failed_runs,
+    )
+
+
+@dataclass
+class RecentContext:
+    repo: str
+    limit: int
+    outdir: Path
+    branch: str | None = None
+    workflow: str | None = None
+    log_workers: int = 4
+    gh_retries: int = 2
+    # Populated during collection
+    runs: list[dict] = field(default_factory=list)
+
+
+def collect_recent(ctx: RecentContext) -> None:
+    """Fetch recent failed runs across the repo and download their logs."""
+    import shutil
+    shutil.rmtree(ctx.outdir, ignore_errors=True)
+    ctx.outdir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("==> Fetching recent failed runs for %s", ctx.repo)
+    args = [
+        "run", "list", "--repo", ctx.repo,
+        "--status", "failure",
+        "--json", "databaseId,name,headBranch,headSha,displayTitle,workflowName,createdAt,url,event",
+        "--limit", str(ctx.limit),
+    ]
+    if ctx.branch:
+        args.extend(["--branch", ctx.branch])
+    if ctx.workflow:
+        args.extend(["--workflow", ctx.workflow])
+
+    runs = gh_json(args, default=[], allow_fail=True, retries=ctx.gh_retries)
+    if not isinstance(runs, list):
+        runs = []
+    ctx.runs = runs
+    write_json(ctx.outdir / "runs-summary.json", runs)
+
+    logger.info("==> Found %d failed runs", len(runs))
+
+    # Download logs for each run (reuse the same pattern as PR mode)
+    def download_one(run: dict) -> None:
+        run_id = str(run.get("databaseId") or "")
+        if not run_id:
+            return
+        run_dir = ctx.outdir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        run_view = gh_json(
+            ["run", "view", run_id, "--repo", ctx.repo, "--json", "jobs"],
+            default={}, allow_fail=True, retries=ctx.gh_retries,
+        )
+        jobs = (run_view.get("jobs") or []) if isinstance(run_view, dict) else []
+        write_json(run_dir / "jobs.json", jobs)
+        failed_jobs = [j for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"]
+
+        if not failed_jobs:
+            return
+
+        for job in failed_jobs:
+            job_id = str(job.get("databaseId") or "")
+            job_name = str(job.get("name") or "job")
+            if not job_id:
+                continue
+            logger.info("    Run %s, job '%s' (%s)", run_id, job_name, job_id)
+            log = run_gh(
+                ["run", "view", run_id, "--repo", ctx.repo, "--job", job_id, "--log-failed"],
+                allow_fail=True, retries=ctx.gh_retries,
+            )
+            text = log.stdout
+            if log.returncode != 0 and log.stderr:
+                text = (text + "\n" + log.stderr).strip() + "\n"
+            (run_dir / f"{sanitize(job_name)}.txt").write_text(text, encoding="utf-8")
+
+    run_ids = [r for r in runs if r.get("databaseId")]
+    if ctx.log_workers <= 1 or len(run_ids) <= 1:
+        for r in run_ids:
+            download_one(r)
+    else:
+        with ThreadPoolExecutor(max_workers=ctx.log_workers) as pool:
+            futures = {pool.submit(download_one, r): r for r in run_ids}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.warning("    Run %s: log download failed: %s", futures[future].get("databaseId"), exc)
+
+
+def build_recent_template_context(ctx: RecentContext) -> RecentTemplateContext:
+    failed_runs: list[RecentFailedRun] = []
+    for run in ctx.runs:
+        run_id = str(run.get("databaseId") or "")
+        if not run_id:
+            continue
+        run_dir = ctx.outdir / run_id
+        log_files = sorted(p for p in run_dir.glob("*.txt") if p.stat().st_size > 0) if run_dir.exists() else []
+        logs = [RunLog(path=make_cwd_relative(p), size_bytes=p.stat().st_size) for p in log_files]
+
+        failed_jobs: list[str] = []
+        jobs_file = run_dir / "jobs.json"
+        if jobs_file.exists():
+            try:
+                jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
+                failed_jobs = [str(j.get("name") or "unknown") for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"]
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        failed_runs.append(RecentFailedRun(
+            run_id=run_id,
+            workflow_name=run.get("workflowName") or run.get("name") or "unknown",
+            display_title=run.get("displayTitle") or "",
+            branch=run.get("headBranch") or "",
+            head_sha=run.get("headSha") or "",
+            created_at=run.get("createdAt") or "",
+            event=run.get("event") or "",
+            url=run.get("url") or "",
+            logs=logs,
+            failed_jobs=failed_jobs,
+        ))
+
+    return RecentTemplateContext(
+        repo=ctx.repo,
+        limit=ctx.limit,
+        branch_filter=ctx.branch,
+        workflow_filter=ctx.workflow,
+        basedir=make_cwd_relative(ctx.outdir),
         failed_runs=failed_runs,
     )

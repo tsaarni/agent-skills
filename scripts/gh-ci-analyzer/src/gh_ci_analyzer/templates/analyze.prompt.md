@@ -168,7 +168,7 @@ Failed jobs: {{ run.failed_jobs | join(', ') }}
 {% if run.logs -%}
 Logs:
 {% for log in run.logs -%}
-- `{{ log.path }}` ({{ log.size_kb }}KB)
+- `{{ log.path }}` ({{ log.size_display }})
 {% endfor -%}
 {% else -%}
 No logs downloaded.
