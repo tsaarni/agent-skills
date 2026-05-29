@@ -9,27 +9,27 @@ description: Contour version bumps (Go, Envoy), dependency updates, and vulnerab
 - **Target**: Contour repository (github.com/projectcontour/contour)
 - **Supported Branches**: `main` and release-X.Y branches only
 - **Platform**: Linux/macOS only
-- **Prerequisites**: Contour repository checked out locally, `gh` CLI, `git`, `go`, `httpie`, `osv-scanner` installed
+- **Prerequisites**: Contour repository checked out locally, `gh` CLI, `git`, `go`, `httpie`, `osv-scanner`, `govulncheck` installed
 
 ## Global Preconditions (MUST validate before ANY task)
 
-Execute these checks and STOP if any fail:
+Execute these checks and CONTINUE only if all pass:
 
 ```bash
 # 1. Verify current directory is Contour repo root
 test -f Makefile && test -f versions.yaml && echo "✓ In Contour repo root" || echo "✗ NOT in Contour root"
 ```
 
-STOP here if any check fails. Do not proceed to specific tasks.
+CONTINUE to specific tasks only if all checks pass.
 
 ## Critical Warnings
 
-**NEVER:**
-- Use `go.mod` to determine Go version → ONLY read from `Makefile` variable `BUILD_BASE_IMAGE`
-- Use `versions.yaml` from release branches → ONLY read from `main` branch
-- Create local branches without `chore/` prefix
-- Skip git status checks between operations
-- Assume tool versions without explicit verification
+**ALWAYS:**
+- Determine Go version by reading from `Makefile` variable `BUILD_BASE_IMAGE` only
+- Read `versions.yaml` from `main` branch only
+- Create local branches with `chore/` prefix
+- Execute git status checks between operations
+- Verify tool versions with explicit verification before use
 
 **ONLY:**
 - Create branches with format: `chore/release-<VERSION>/bump-<TYPE>-<NEW_VERSION>`
@@ -63,7 +63,7 @@ echo "Available Contour release tracks are:"
 
 MUST capture the output and present it to user.
 MUST ask user: "Which Contour release branch to update? (e.g., 1.33, 1.32, or 'main')"
-STOP and WAIT for response before continuing.
+WAIT for response and CONTINUE once user responds.
 
 ### Step 2: Verify Current Go Version (REQUIRED)
 
@@ -76,7 +76,7 @@ git pull
 ```
 
 Expected: Branch successfully checked out and up-to-date.
-STOP if git commands fail.
+CONTINUE only if git commands succeed.
 
 THEN execute:
 ```bash
@@ -100,13 +100,12 @@ echo "New Go version: ${NEW_GO_VERSION}"
 ```
 
 Decision point:
-- IF output shows same Go version as before: Report "Go version already at latest patch level ${OLD_GO_VERSION} for current track"
-- STOP here, do not proceed to next steps
-- ELSE IF changes detected: Continue to Step 4
+- IF output shows same Go version as before: Report "Go version already at latest patch level ${OLD_GO_VERSION} for current track" and STOP
+- IF changes detected: Continue to Step 4
 
 ### Step 4: Commit Changes (SEQUENTIAL)
 
-DO NOT execute this step if Step 3 showed we're already at the latest Go version.
+Execute this step ONLY if Step 3 showed changes detected.
 
 MUST execute:
 ```bash
@@ -161,7 +160,7 @@ echo "Available Contour release tracks are:"
 
 MUST capture the output and present it to user.
 MUST ask user: "Which Contour release branch to update? (e.g., 1.33, 1.32, or 'main')"
-STOP and WAIT for response before continuing.
+WAIT for response and CONTINUE once user responds.
 
 ### Step 2: Verify Current Envoy Version (REQUIRED)
 
@@ -174,7 +173,7 @@ git pull
 ```
 
 Expected: Branch successfully checked out and up-to-date.
-STOP if git commands fail.
+CONTINUE only if git commands succeed.
 
 THEN execute:
 ```bash
@@ -198,13 +197,12 @@ echo "Current Envoy version: ${NEW_ENVOY_VERSION}"
 ```
 
 Decision point:
-- IF output shows same Envoy version as before: Report "Envoy version already at latest patch level ${OLD_ENVOY_VERSION} for current track"
-- STOP here, do not proceed to next steps and ignore the instructions from the tool about updates needed in versions.yaml and compatibility matrix
-- ELSE IF changes detected: Continue to Step 4
+- IF output shows same Envoy version as before: Report "Envoy version already at latest patch level ${OLD_ENVOY_VERSION} for current track" and STOP (skip tool instructions about versions.yaml and compatibility matrix updates)
+- IF changes detected: Continue to Step 4
 
 ### Step 4: Commit Changes (SEQUENTIAL)
 
-DO NOT execute this step if Step 3 showed we're already at the latest Envoy version.
+Execute this step ONLY if Step 3 showed changes detected.
 
 MUST execute:
 ```bash
@@ -260,7 +258,7 @@ echo "Available Contour release tracks are:"
 
 MUST capture the output and present it to user.
 MUST ask user: "Which Contour release branch to scan? (e.g., 1.33, 1.32, or 'main')"
-STOP and WAIT for response before continuing.
+WAIT for response and CONTINUE once user responds.
 
 ### Step 2: Extract Go Version from Makefile (REQUIRED)
 
@@ -273,7 +271,7 @@ git pull
 ```
 
 Expected: Branch successfully checked out and up-to-date.
-STOP if git commands fail.
+CONTINUE only if git commands succeed.
 
 
 MUST execute:
@@ -284,7 +282,7 @@ echo "Go version used for the scan: $GO_VERSION"
 
 MUST capture GO_VERSION and verify it's not empty (format: X.Y.Z).
 MUST report the Go version to the user: "Go version detected for this branch: $GO_VERSION"
-STOP if extraction fails.
+CONTINUE only if extraction succeeds.
 
 ### Step 3: Create OSV Scanner Override File (REQUIRED)
 
@@ -311,7 +309,7 @@ osv-scanner scan source -r . \
 ```
 
 Expected: `osv-results.json` file created in current directory.
-STOP if scan fails with error (not if vulnerabilities found).
+CONTINUE only if scan succeeds (vulnerabilities found are acceptable).
 
 ### Step 5: Analyze Results (REQUIRED)
 
@@ -354,7 +352,7 @@ Status: [No known vulnerabilities found | Vulnerabilities detected - review abov
 
 ### Step 1: Determine Target Version(s) (REQUIRED)
 
-MUST ask user: "Scan single version, all supported versions?"
+MUST ask user: "Scan single version or all supported versions?"
 
 Decision:
 - IF "single": Ask "Which version?" and capture input (e.g., "1.33.0", "main")
@@ -432,7 +430,7 @@ Status: [No known vulnerabilities found | Vulnerabilities detected - review abov
 
 ### Step 1: Determine Target Version(s) (REQUIRED)
 
-MUST ask user: "Scan single version, all supported versions?"
+MUST ask user: "Scan single version or all supported versions?"
 
 Decision:
 - IF "single": Ask "Which version?" and capture input (e.g., "1.33.0", "main")
@@ -456,7 +454,7 @@ echo "Envoy version found: $ENVOY_VERSION"
 ```
 
 MUST capture ENVOY_VERSION and verify it's not empty (format: vX.Y.Z).
-STOP if extraction fails.
+CONTINUE only if extraction succeeds.
 
 ### Step 3: Query OSV API (NON-REVOCABLE)
 
@@ -468,7 +466,7 @@ curl -s -X POST https://api.osv.dev/v1/query \
 ```
 
 Expected: JSON response returned to stdout.
-STOP if HTTP request fails with error.
+CONTINUE only if HTTP request succeeds.
 
 ### Step 4: Parse and Analyze Results (REQUIRED)
 
@@ -543,12 +541,12 @@ gh release view --repo kubernetes-sigs/kind
 MUST show both current and latest versions to user.
 MUST check if Kind node images are available for the latest Kubernetes version (check Kind release notes for supported versions).
 MUST ask: "Should we update to Kubernetes $LATEST_K8S? (yes/no)"
-STOP and WAIT for response.
+WAIT for response to CONTINUE.
 
 Decision:
-- IF user says "no": STOP and report "Update skipped"
-- IF versions already match: Stop with "No new Kubernetes version to update to"
 - IF user says "yes": Continue to Step 3
+- IF user says "no": STOP and report "Update skipped"
+- IF versions already match: STOP with "No new Kubernetes version to update to"
 
 ### Step 3: Create Feature Branch (NON-REVOCABLE)
 
@@ -704,7 +702,7 @@ Next: Push branch and create pull request:
 
 MUST refer to: `site/content/resources/release-process.md`
 
-STOP and read that file first if you are executing a release.
-These skill instructions do NOT cover release process — it is documented separately.
+Read that file first if you are executing a release.
+Release process is documented in that separate file, not in these skill instructions.
 
 ---

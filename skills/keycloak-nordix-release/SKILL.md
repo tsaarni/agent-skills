@@ -91,7 +91,7 @@ Nordix maintains forked branches for specific Keycloak versions with strategic b
    ```
 
 3. **Check if any are already in the new base release**
-   - Those can be skipped when creating the new nordix branch
+   - Note which commits are already in the new base release (these will be omitted when creating the new nordix branch)
 
 4. **Summarize findings**
    - Create a list of commits to cherry-pick, with commit id and description.
@@ -120,7 +120,7 @@ Nordix maintains forked branches for specific Keycloak versions with strategic b
 This phase applies to any explicit backport request: a CVE/security fix, a commit hash given directly, or any other targeted patch.
 
 1. **Locate the commit** to backport
-   - If a commit hash is given directly, skip to step 2
+   - If a commit hash is given directly, proceed directly to step 2
    - If a CVE ID is given, find the fix commit using these methods in order:
 
    **Method 1: Search GitHub advisories by CVE ID**
@@ -185,7 +185,7 @@ This phase applies to any explicit backport request: a CVE/security fix, a commi
 ### Phase 7: Summarization
 
 1. **Summarize what was done**
-2. **List commands for user to run** to push the new branch and tag to nordix remote (do NOT run these)
+2. **Provide user with commands to execute** to push the new branch and tag to nordix remote (the agent will display these for reference only)
    ```bash
    git push nordix {version}-nordix
    git push nordix {version}-nordix-{patch}

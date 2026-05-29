@@ -14,20 +14,20 @@ description: Contour+kind cluster management (create/delete/setup), run Contour 
 
 ## Global Preconditions (MUST validate before ANY task)
 
-Execute these checks and STOP if any fail:
+Execute these checks and CONTINUE only if all pass:
 
 ```bash
 # 1. Verify current directory is Contour repo root
 test -f Makefile && test -f go.mod && grep -q 'module github.com/projectcontour/contour' go.mod && echo "✓ In Contour repo root" || echo "✗ NOT in Contour root"
 ```
 
-STOP if any check fails. Install missing tools or navigate to Contour repo root before proceeding.
+CONTINUE to task execution only if all checks pass. Install missing tools or navigate to Contour repo root as needed.
 
 ## Critical Warnings
 
-**NEVER:**
-- Skip `make checkall` before committing changes
-- Use `curl` for testing endpoints → ONLY use `http` (httpie CLI command)
+**ALWAYS:**
+- Run `make checkall` before committing changes
+- Use `http` (httpie CLI command) for testing endpoints instead of `curl`
 
 ---
 
@@ -96,7 +96,7 @@ Expected:
 IF tests fail: Review error output and fix issues before proceeding.
 IF generated code differs: Execute `make generate` and commit changes.
 
-STOP if `make checkall` does not exit with status 0.
+CONTINUE with other tasks only if `make checkall` exits with status 0.
 
 ### Step 2: Run Individual Checks (OPTIONAL)
 
@@ -132,7 +132,7 @@ Expected:
 - Output ends with: "✓ Cluster ready"
 
 IF script fails: Check error message (usually docker issues), review `kind get clusters` output.
-STOP if cluster not created successfully.
+CONTINUE to next step only if cluster created successfully.
 
 ### Step 2: Verify Cluster Health (REQUIRED)
 
@@ -200,8 +200,8 @@ Expected:
 - Envoy DaemonSet redeployed
 - Output confirms configuration applied
 
-IF script fails: Review error output, do not proceed to Step 2.
-STOP if configuration not applied.
+IF script fails: Review error output and resolve before proceeding to Step 2.
+CONTINUE to Step 2 only if configuration applied successfully.
 
 ### Step 2: Verify Configuration (REQUIRED)
 
@@ -415,7 +415,7 @@ Expected:
 - No errors
 - Image available in cluster
 
-STOP if this step fails; cluster may not exist.
+CONTINUE to next step only if this step succeeds; verify cluster exists with `kind get clusters` if needed.
 
 ### Step 3: Patch Deployments to Use Custom Image (SEQUENTIAL - ONE TIME)
 
@@ -510,7 +510,7 @@ Expected: Only matching tests execute.
 
 Decision:
 - IF test passes: Feature works correctly
-- IF test fails: Debug with logs from previous task
+- IF test fails: Review failure message and debug with logs from previous task
 
 ### Step 3: Review Test Output (REQUIRED)
 
