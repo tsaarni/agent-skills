@@ -12,12 +12,6 @@ PWD := $(shell pwd)
 install:
 	@echo "Installing agent skills..."
 
-	# Copilot CLI skills
-	@mkdir -p "$(HOME)/.copilot"
-	@rm -rf "$(HOME)/.copilot/skills"
-	@ln -sfn "$(PWD)/skills" "$(HOME)/.copilot/skills"
-	@echo "Linked skills to $(HOME)/.copilot/skills"
-
 	# Gemini CLI skills
 	@mkdir -p "$(HOME)/.gemini"
 	@rm -rf "$(HOME)/.gemini/skills"
@@ -37,5 +31,11 @@ install:
 	@rm -rf "$(HOME)/.kiro/skills"
 	@ln -sfn "$(PWD)/skills" "$(HOME)/.kiro/skills"
 	@echo "Linked skills to $(HOME)/.kiro/skills"
+
+	# Agents skills (github copilot, pi)
+	@mkdir -p "$(HOME)/.agents"
+	@rm -rf "$(HOME)/.agents/skills"
+	@ln -sfn "$(PWD)/skills" "$(HOME)/.agents/skills"
+	@echo "Linked skills to $(HOME)/.agents/skills"
 
 	@echo "Done!"
