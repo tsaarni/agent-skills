@@ -1,5 +1,5 @@
 ---
-name: keycloak-nordix-release
+name: keycloak-nordix-maintenance
 description: 'Create Keycloak nordix fork releases with version-specific backports and security fixes. Use when creating new nordix branches (e.g., 26.2.14-nordix), cherry-picking backports from previous nordix versions, backporting patches like CVEs, managing merge conflicts in cherry-picks, and version tagging nordix releases.'
 ---
 
@@ -146,6 +146,41 @@ This phase applies to any explicit backport request: a CVE/security fix, a commi
      ```bash
      git --no-pager log --all --oneline --grep="keyword-from-cve-description" origin/main
      ```
+
+   **Method 5: Find fix commit via GitHub issue → PR → release branch comparison**
+
+   Many Keycloak CVEs are tracked as GitHub issues first and fixed in private PRs that are merged directly to release branches before public disclosure. The fix commit often does **not** contain the CVE ID in its message. Use this workflow:
+
+   a. Find the GitHub issue number (usually referenced from the CVE advisory or NVD page):
+      ```bash
+      gh issue view {issue-number} --repo keycloak/keycloak
+      ```
+
+   b. Find the fix PR (check issue labels for `release/X.Y.Z` and look for linked PRs):
+      ```bash
+      gh pr list --repo keycloak/keycloak --state merged --base release/{X.Y} --search "CVE-XXXX-XXXXX" --json number,title,mergeCommit
+      ```
+
+   c. If not found by CVE ID, compare release tags to find commits in the target release:
+      ```bash
+      gh api repos/keycloak/keycloak/git/refs/tags | jq -r '.[] | select(.ref | test("X.Y.Z")) | .object.sha'
+      # Then compare:
+      gh api "repos/keycloak/keycloak/compare/{prev-tag}...{target-tag}" | \
+        jq -r '.commits[] | "\(.sha[0:12])  \(.commit.message | split("\n")[0])"'
+      ```
+
+   d. Match commit descriptions to the CVE by understanding what the CVE is about. Examples:
+      - Session fixation → look for "authSessionCookie" or "SessionCodeChecks"
+      - Open redirect via wildcard → look for "Wildcards" or "authority cannot be parsed"
+      - SAML DoS → look for "SAML11" or "parsing"
+      - Implicit flow bypass → look for "redirect_uri from client_data"
+      - XSS in org selection → look for "inline handlers" or "org buttons"
+
+   **Important caveats:**
+   - Keycloak CVE fix commits on release branches often come from private pre-release PRs with short PR numbers (e.g., `#603`, `#609`) that differ from the public GitHub issue numbers.
+   - The commit message title may not mention CVE at all — the CVE ID only appears in the public issue/PR opened after the embargo lifts.
+   - **Do not confuse CVEs that are backported "Not Before" fix together**: e.g., "fix not before validation" in Keycloak 26.6.2/26.4.12 is CVE-2026-8922 (token introspection notBefore), NOT CVE-2026-7571 (implicit flow bypass). Always verify by checking the closing issue number.
+   - CVE-2026-37977 (CORS/UMA) was NOT included in 26.4.12 or 26.6.2 despite the issue having those release labels — it was backported later (26.4.13/26.6.3). Always verify by comparing release tags, not just issue labels.
 
 2. **Review the commit before applying**
    ```bash

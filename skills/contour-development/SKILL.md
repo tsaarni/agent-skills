@@ -51,6 +51,8 @@ EOF
 
 Expected: `.vscode/settings.json` file created with e2e build tags.
 
+Without this configuration, Go language server will not recognize e2e test files as part of the module, resulting in syntax errors and broken code navigation.
+
 ### Step 2: Reload Go Language Server (REQUIRED)
 
 MUST execute in VS Code:
@@ -471,9 +473,98 @@ Expected: New pods running with updated code.
 
 ---
 
-## Task: Run End-to-End Tests
+## Task: Run End-to-End Tests (Makefile Workflow)
 
-**What this does**: Execute e2e test suite against running Kind cluster.
+**What this does**: Execute e2e test suite using the Makefile targets that manage the Kind cluster, image builds, and test execution.
+
+**Precondition**: Docker daemon running, `kind`, `kubectl`, `go`, `make` installed.
+
+### Step 1: Create Kind Cluster and Load Contour Image (FIRST TIME)
+
+MUST execute:
+```bash
+make setup-kind-cluster load-contour-image-kind
+```
+
+Expected:
+- Kind cluster `contour-e2e` created (or reused if already exists)
+- MetalLB, cert-manager, Gateway API CRDs, and Contour CRDs deployed
+- Contour container image built and loaded into kind nodes
+
+### Step 2: Run All E2E Tests (SEQUENTIAL)
+
+MUST execute:
+```bash
+make run-e2e
+```
+
+Expected:
+- Ginkgo runs all e2e test suites (httpproxy, gateway, infra, ingress, etc.)
+- Tests start local Contour and use in-cluster Envoy
+- Results reported at end
+
+### Step 3: Run Focused Tests (OPTIONAL)
+
+To run only tests matching a regex pattern:
+```bash
+make run-e2e CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
+```
+
+To limit to a specific test package:
+```bash
+make run-e2e CONTOUR_E2E_PACKAGE_FOCUS=./test/e2e/httpproxy CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
+```
+
+Both can be combined with `setup-kind-cluster` if the cluster needs to be created first:
+```bash
+make setup-kind-cluster run-e2e CONTOUR_E2E_PACKAGE_FOCUS=./test/e2e/httpproxy CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
+```
+
+Expected: Only matching tests execute.
+
+### Step 4: Run with Verbose Output (OPTIONAL)
+
+The Makefile does not support passing extra ginkgo flags. For verbose output (`-v` or `-vv`), run ginkgo directly:
+```bash
+CONTOUR_E2E_LOCAL_HOST=$(make -s print-local-ip 2>/dev/null || ifconfig | grep inet | grep -v '::' | grep -v 'inet 127.' | head -n1 | awk '{print $2}') \
+CONTOUR_E2E_IMAGE=ghcr.io/projectcontour/contour:main \
+go run github.com/onsi/ginkgo/v2/ginkgo -tags=e2e -vv -poll-progress-after=120s \
+  --focus "httpproxy-jwt" ./test/e2e/httpproxy/
+```
+
+Expected: Full per-step output including GinkgoWriter logs.
+
+### Step 5: Clean Up Stale Namespaces (IF NEEDED)
+
+If tests fail mid-run, namespaces may be left behind causing subsequent runs to fail with "namespace already exists":
+```bash
+kubectl delete ns <test-namespace> --ignore-not-found
+```
+
+The namespace name is derived from the test registration name (e.g., `httpproxy-jwt-local-jwks`).
+
+### Step 6: Rebuild Image After Code Changes (SEQUENTIAL)
+
+After modifying Contour source, rebuild and reload the image:
+```bash
+make load-contour-image-kind
+```
+
+Then re-run tests (Step 2 or 3). No cluster restart needed.
+
+### Step 7: Delete Cluster (OPTIONAL)
+
+```bash
+make cleanup-kind
+```
+
+Expected: Kind cluster `contour-e2e` deleted.
+
+---
+
+## Task: Run End-to-End Tests (Development Cluster)
+
+**What this does**: Execute e2e test suite against the scripts-based development Kind cluster.
 
 **Precondition**:
 - Kind cluster running and healthy (from setup task)
