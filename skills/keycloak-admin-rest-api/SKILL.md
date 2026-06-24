@@ -101,6 +101,8 @@ http POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users \
   credentials:='[{"type": "password", "value": "joe", "temporary": false}]'
 ```
 
+User should have at least first name, last name and email.
+
 Create user with full details:
 
 ```bash

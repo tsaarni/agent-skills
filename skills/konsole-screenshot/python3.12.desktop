@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Python (v3.12)
+Comment=Python Interpreter (v3.12)
+Exec=/usr/bin/python3.12
+Icon=/usr/share/pixmaps/python3.12.xpm
+Terminal=true
+Type=Application
+Categories=Development;
+StartupNotify=true
+NoDisplay=true
+X-KDE-DBUS-Restricted-Interfaces=org.kde.kwin.Screenshot,org.kde.KWin.ScreenShot2
