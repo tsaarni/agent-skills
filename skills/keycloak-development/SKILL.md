@@ -159,7 +159,7 @@ Use provided docker compose wrapper [./scripts/docker-compose-wrapper.sh](./scri
 ### PostgreSQL
 
 ```bash
-./scripts/docker-compose-wrapper.sh up -d postgres
+<SKILL_ROOT>./scripts/docker-compose-wrapper.sh up -d postgres
 
 # Connect to PostgreSQL CLI
 docker exec -it keycloak-postgres-1 psql --username=keycloak
@@ -168,7 +168,7 @@ docker exec -it keycloak-postgres-1 psql --username=keycloak
 ### OpenLDAP
 
 ```bash
-./scripts/docker-compose-wrapper.sh up -d openldap
+<SKILL_ROOT>./scripts/docker-compose-wrapper.sh up -d openldap
 ```
 
 

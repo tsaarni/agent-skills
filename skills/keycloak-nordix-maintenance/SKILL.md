@@ -34,20 +34,7 @@ Nordix maintains forked branches for specific Keycloak versions with strategic b
 
 ### Phase 0: Preparation
 
-1. **Check that repository is ready** with both remotes configured
-   ```bash
-   git remote -v
-   ```
-   - nordix `git@github.com:Nordix/keycloak.git`
-   - origin `https://github.com/keycloak/keycloak.git`
-
-2. **Ensure working directory is clean** and on a safe branch
-   ```bash
-   git status
-   git checkout main
-   ```
-
-3. **Fetch latest branches and tags** from both remotes
+1. **Fetch latest branches and tags** from both remotes
    ```bash
    git fetch nordix --tags --force
    git fetch origin --tags --force
