@@ -3,7 +3,7 @@ name: envoy-development
 description: Run Envoy, development environment setup, custom builds, debugging, e2e testing
 ---
 
-# Envoy Development 
+# Envoy Development
 
 ## Lightweight Envoy Build
 
@@ -110,7 +110,7 @@ bazel run //tools/code_format:check_format -- fix <directrory>
 ```
 
 Or if you just want clang-format on those specific files without the full checker:
- 
+
 ```bash
 bazel run @llvm_toolchain_llvm//:bin/clang-format -- -i <file1> <file2> ...
 ```
@@ -125,11 +125,11 @@ bazel run @llvm_toolchain_llvm//:bin/clang-format -- -i <file1> <file2> ...
 
 ### Tools
 
-Use following tools 
+Use following tools
 
-- **runagent** — `go run github.com/tsaarni/runagent/cmd/runagent@latest` — background process manager. Link https://github.com/tsaarni/runagent.
-- **echoserver** — `go run github.com/tsaarni/echoserver@latest` — HTTP backend echoing request details as JSON. 
-- **echoclient** — `go get github.com/tsaarni/echoclient` — Go load testing library + CLI. 
+- **runagent** — `go run github.com/tsaarni/runagent/cmd/runagent@latest` — background process manager.
+- **echoserver** — `go run github.com/tsaarni/echoserver@latest` — HTTP backend echoing request details as JSON.
+- **echoclient** — `go get github.com/tsaarni/echoclient` — Go load testing library + CLI.
 - **httpie** — `http` — manual HTTP requests.
 
 ### Starting Services
@@ -140,8 +140,6 @@ runagent run -n envoy -- bazel-bin/source/exe/envoy-static -c test-config.yaml -
 runagent status echoserver
 runagent logs envoy --last 10
 ```
-
-See `runagent --help --json` for full list of commands and options.
 
 ### Envoy Config Template
 
@@ -216,7 +214,7 @@ pool := worker.NewWorkerPool(
 )
 pool.Launch()
 pool.Wait()
-metrics.DumpMetrics(os.Stdout)
+metrics.DumpMetricsJSON(os.Stdout)
 
 // Upload with generated payload
 body := generator.NewReader(generator.WithRandom(), generator.WithTotalSize(1024))
@@ -241,5 +239,3 @@ See source code for more details
 
 - Local copy `~/work/echoserver/`
 - GitHub https://github.com/tsaarni/echoserver
-
-
