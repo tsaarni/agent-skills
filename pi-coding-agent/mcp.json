@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mcpuppet": {
+      "url": "http://127.0.0.1:5420/mcp"
+    }
+  }
+}
+
