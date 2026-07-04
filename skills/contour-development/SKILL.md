@@ -1,6 +1,6 @@
 ---
 name: contour-development
-description: Contour+kind cluster management (create/delete/setup), run Contour locally against cluster Envoy, development environment setup, custom image builds, debugging, e2e testing
+description: Use when needing development environment with Kind to do development, debug/troubleshoot, and creating custom container images.
 ---
 
 # Contour Development

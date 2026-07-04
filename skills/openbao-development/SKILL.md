@@ -1,6 +1,6 @@
 ---
 name: openbao-development
-description: Use when working on OpenBao testing, troubleshooting, learning runtime behavior, raft storage.
+description: Use when developing, testing, troubleshooting, learning runtime behavior.
 ---
 
 # OpenBao Development

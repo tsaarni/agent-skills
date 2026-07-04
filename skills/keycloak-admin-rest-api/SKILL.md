@@ -1,6 +1,6 @@
 ---
 name: keycloak-admin-rest-api
-description: Interact with Keycloak admin REST API using httpie. Manage realms, users, clients, LDAP federation, identity providers, and authorization services. Use when working with Keycloak administration, user management, OAuth/OIDC configuration, or UMA authorization.
+description: Interact with the admin REST API. Manage realms, users, clients, LDAP federation, identity providers, OAuth2/OIDC, and authorization services and UMA.
 ---
 
 # Keycloak Admin REST API

@@ -1,6 +1,6 @@
 ---
 name: keycloak-development
-description: Setup and work with Keycloak development environment including building, debugging, testing, and working with databases, LDAP and Kubernetes.
+description: Setup development environment including building, debugging/troubleshooting and testing.
 ---
 
 # Keycloak Development Environment

@@ -1,6 +1,6 @@
 ---
 name: keycloak-nordix-maintenance
-description: 'Create Keycloak nordix fork releases with version-specific backports and security fixes. Use when creating new nordix branches (e.g., 26.2.14-nordix), cherry-picking backports from previous nordix versions, backporting patches like CVEs, managing merge conflicts in cherry-picks, and version tagging nordix releases.'
+description: Create fork releases with cherry-picked backports and security fixes.
 ---
 
 # Keycloak Nordix Release Skill
