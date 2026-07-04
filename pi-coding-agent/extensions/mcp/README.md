@@ -1,6 +1,6 @@
-# pi-extension-mcp
+# MCP Extension for Pi Coding Agent
 
-MCP (Model Context Protocol) extension for pi coding agent. Connects to MCP servers and exposes their tools to pi.
+Connects to MCP servers and exposes their tools to pi.
 
 ## Setup
 

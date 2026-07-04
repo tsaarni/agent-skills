@@ -69,3 +69,13 @@ Delete `~/.cache/gondolin/images/refs/alpine-base` to go back to the default.
 - `grep` runs `rg` inside the VM; `find` uses `fd`.
 - Shell commands run via `/bin/sh`.
 - Overlay is discarded on exit (unless `--persist`).
+
+## pnpm and gondolin
+
+When working on a pnpm project inside the Gondolin Agent Sandbox, the workspace directory exposed to the VM must contain the files rather than links that point outside the mounted filesystem.
+To force pnpm to write files directly into the workspace, add the following configuration to `pnpm-workspace.yaml` and run `pnpm install`.
+
+```yaml
+nodeLinker: hoisted
+symlink: false
+```
