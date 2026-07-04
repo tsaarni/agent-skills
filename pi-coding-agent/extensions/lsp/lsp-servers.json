@@ -1,0 +1,58 @@
+{
+  "languages": {
+    "typescript": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "fileExtensions": [".ts", ".tsx", ".cts", ".mts"],
+      "heuristics": {
+        "files": ["tsconfig.json", "package.json"]
+      }
+    },
+    "javascript": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "fileExtensions": [".js", ".jsx", ".cjs", ".mjs"],
+      "heuristics": {
+        "files": ["jsconfig.json", "package.json"]
+      }
+    },
+    "python": {
+      "command": "pyright-langserver",
+      "args": ["--stdio"],
+      "fileExtensions": [".py"],
+      "heuristics": {
+        "files": ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile"]
+      }
+    },
+    "go": {
+      "command": "gopls",
+      "args": [],
+      "fileExtensions": [".go"],
+      "heuristics": {
+        "files": ["go.mod", "go.work"]
+      }
+    },
+    "rust": {
+      "command": "rust-analyzer",
+      "args": [],
+      "fileExtensions": [".rs"],
+      "heuristics": {
+        "files": ["Cargo.toml"]
+      }
+    },
+    "java": {
+      "command": "jdtls",
+      "args": [],
+      "fileExtensions": [".java"],
+      "heuristics": {
+        "files": [
+          "pom.xml",
+          "build.gradle",
+          "build.gradle.kts",
+          "settings.gradle",
+          "settings.gradle.kts"
+        ]
+      }
+    }
+  }
+}
