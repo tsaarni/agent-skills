@@ -1,3 +1,4 @@
+// Detects the workspace programming language using project configuration files and file extensions.
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -11,6 +12,9 @@ export interface LanguageConfig {
 }
 
 export interface ServersConfig {
+  defaultLimit?: number;
+  defaultTimeoutMs?: number;
+  workspaceSearchTimeoutMs?: number;
   languages: Record<string, LanguageConfig>;
 }
 

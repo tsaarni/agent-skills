@@ -1,11 +1,12 @@
+// Extension entry point that integrates the manager and registers event listeners.
 import * as fs from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { LspClientManager } from "./client.js";
-import { detectWorkspaceLanguage, type ServersConfig } from "./heuristics.js";
+import { detectWorkspaceLanguage, type ServersConfig } from "./detector.js";
+import { LspClientManager } from "./manager.js";
 import { registerLspTools } from "./tools.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -19,7 +20,7 @@ async function loadServersConfig(): Promise<ServersConfig> {
   if (serversConfig) return serversConfig;
 
   // Search in extension dir or adjacent dir
-  const pathsToTry = [join(__dirname, "../lsp-servers.json"), join(__dirname, "lsp-servers.json")];
+  const pathsToTry = [join(__dirname, "../lsp-config.json"), join(__dirname, "lsp-config.json")];
 
   for (const p of pathsToTry) {
     try {
@@ -31,45 +32,95 @@ async function loadServersConfig(): Promise<ServersConfig> {
     }
   }
 
-  throw new Error("Could not load lsp-servers.json config file");
+  throw new Error("Could not load lsp-config.json config file");
+}
+
+function getLspProjectConfigPath(workspaceDir: string): string {
+  const agentDir = getAgentDir();
+  const resolvedCwd = resolve(workspaceDir);
+  // Replicate safe encoding: replace leading slash/backslash and substitute remaining slashes/backslashes/colons with dashes
+  const safePath = `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  return join(agentDir, "lsp-extension", safePath, "lsp.json");
+}
+
+async function resolveLanguageFromCommand(command: string): Promise<string> {
+  try {
+    const config = await loadServersConfig();
+    for (const [langId, langConfig] of Object.entries(config.languages)) {
+      if (langConfig.command === command || command.endsWith(langConfig.command)) {
+        return langId;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return command;
 }
 
 // Load project initialization config if exists
 async function loadProjectLspConfig(workspaceDir: string): Promise<{
-  initialized: boolean;
+  autostart: boolean;
   language: string;
   command: string;
   args: string[];
 } | null> {
-  const projectConfigPath = join(workspaceDir, CONFIG_DIR_NAME, "lsp-project.json");
+  const parseConfig = async (
+    data: string,
+  ): Promise<{
+    autostart: boolean;
+    language: string;
+    command: string;
+    args: string[];
+  } | null> => {
+    const parsed = JSON.parse(data);
+    if (!parsed.command) return null;
+    let language = parsed.language;
+    if (!language) {
+      language = await resolveLanguageFromCommand(parsed.command);
+    }
+    return {
+      autostart: parsed.autostart ?? parsed.initialized ?? false,
+      language,
+      command: parsed.command,
+      args: parsed.args || [],
+    };
+  };
+
+  // 1. Try project-local config first
+  const projectConfigPath = join(workspaceDir, CONFIG_DIR_NAME, "lsp.json");
   try {
     const data = await fs.readFile(projectConfigPath, "utf8");
-    return JSON.parse(data);
+    return await parseConfig(data);
   } catch {
-    return null;
+    // 2. Fallback to global config
+    const globalConfigPath = getLspProjectConfigPath(workspaceDir);
+    try {
+      const data = await fs.readFile(globalConfigPath, "utf8");
+      return await parseConfig(data);
+    } catch {
+      return null;
+    }
   }
 }
 
 // Save project initialization config
 async function saveProjectLspConfig(
   workspaceDir: string,
-  language: string,
   command: string,
   args: string[],
 ): Promise<void> {
-  const configDir = join(workspaceDir, CONFIG_DIR_NAME);
-  await fs.mkdir(configDir, { recursive: true });
+  const globalConfigPath = getLspProjectConfigPath(workspaceDir);
+  const globalConfigDir = dirname(globalConfigPath);
+  await fs.mkdir(globalConfigDir, { recursive: true });
 
-  const projectConfigPath = join(configDir, "lsp-project.json");
   const payload = {
-    initialized: true,
+    autostart: true,
     initializedAt: new Date().toISOString(),
-    language,
     command,
     args,
   };
 
-  await fs.writeFile(projectConfigPath, JSON.stringify(payload, null, 2), "utf8");
+  await fs.writeFile(globalConfigPath, JSON.stringify(payload, null, 2), "utf8");
 }
 
 export interface LspStatus {
@@ -153,9 +204,9 @@ export default function lspExtension(pi: ExtensionAPI) {
 
     // Auto-start if initialized in this workspace
     const projectConfig = await loadProjectLspConfig(ctx.cwd);
-    if (projectConfig?.initialized) {
+    if (projectConfig?.autostart) {
       try {
-        await lspManager.start(projectConfig.language, projectConfig.command, projectConfig.args);
+        await lspManager.start(projectConfig.command, projectConfig.args);
         sendLspStatus(pi, {
           language: projectConfig.language,
           command: projectConfig.command,
@@ -186,7 +237,6 @@ export default function lspExtension(pi: ExtensionAPI) {
     }
   });
 
-  // Sync file content to LSP server whenever the agent reads or writes files
   pi.on("tool_result", async (event, _ctx) => {
     if (!lspManager?.isServerRunning()) return;
 
@@ -200,11 +250,17 @@ export default function lspExtension(pi: ExtensionAPI) {
       "multi_replace_file_content",
     ];
     if (targetTools.includes(event.toolName) && !event.isError) {
-      const input = event.input as Record<string, unknown> | undefined;
+      const input = event.input;
       if (input) {
         const filePath = input.path || input.AbsolutePath || input.TargetFile;
         if (typeof filePath === "string") {
-          await lspManager.syncFile(filePath);
+          let text: string | undefined;
+          if (event.toolName === "write" && typeof input.content === "string") {
+            text = input.content;
+          } else if (event.toolName === "write_to_file" && typeof input.CodeContent === "string") {
+            text = input.CodeContent;
+          }
+          await lspManager.syncFile(filePath, text);
         }
       }
     }
@@ -214,7 +270,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 
   // Register '/lsp' command to query status or start/stop/restart the server
   pi.registerCommand("lsp", {
-    description: "Manage language server connection (status, init, start, stop, restart)",
+    description: "Manage language server connection (status, init, clean, restart)",
     handler: async (args, ctx) => {
       const subCommand = args?.trim().toLowerCase();
 
@@ -312,10 +368,10 @@ export default function lspExtension(pi: ExtensionAPI) {
             return;
           }
 
-          await saveProjectLspConfig(ctx.cwd, detectedLang, langConfig.command, langConfig.args);
+          await saveProjectLspConfig(ctx.cwd, langConfig.command, langConfig.args);
 
           ctx.ui.notify(`LSP initialized for ${detectedLang}! Starting server...`, "info");
-          await lspManager.start(detectedLang, langConfig.command, langConfig.args);
+          await lspManager.start(langConfig.command, langConfig.args);
           ctx.ui.notify("LSP started successfully.", "info");
           sendLspStatus(pi, {
             language: detectedLang,
@@ -332,43 +388,17 @@ export default function lspExtension(pi: ExtensionAPI) {
         return;
       }
 
-      if (subCommand === "stop") {
-        if (!lspManager.isServerRunning()) {
-          ctx.ui.notify("LSP server is already stopped.", "info");
-          return;
-        }
-        await lspManager.stop();
-        ctx.ui.notify("LSP server stopped.", "info");
-        return;
-      }
-
-      if (subCommand === "start") {
-        if (lspManager.isServerRunning()) {
-          ctx.ui.notify("LSP server is already running.", "info");
-          return;
-        }
-
-        const projectConfig = await loadProjectLspConfig(ctx.cwd);
-        if (!projectConfig) {
-          ctx.ui.notify("LSP not initialized. Run '/lsp init' first.", "warning");
-          return;
-        }
-
-        ctx.ui.notify(`LSP: Starting server for ${projectConfig.language}...`, "info");
+      if (subCommand === "clean") {
+        const globalConfigPath = getLspProjectConfigPath(ctx.cwd);
         try {
-          await lspManager.start(projectConfig.language, projectConfig.command, projectConfig.args);
-          ctx.ui.notify("LSP started.", "info");
-          sendLspStatus(pi, {
-            language: projectConfig.language,
-            command: projectConfig.command,
-            args: projectConfig.args,
-            status: "running",
-            pid: lspManager.getPid(),
-            syncedFilesCount: lspManager.getSyncedFilesCount(),
-          });
+          await fs.rm(globalConfigPath, { force: true });
+          if (lspManager.isServerRunning()) {
+            await lspManager.stop();
+          }
+          ctx.ui.notify("Global LSP configuration removed.", "info");
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
-          ctx.ui.notify(`Failed to start: ${error.message}`, "error");
+          ctx.ui.notify(`Failed to remove global configuration: ${error.message}`, "error");
         }
         return;
       }
@@ -383,7 +413,7 @@ export default function lspExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Restarting LSP server...", "info");
         await lspManager.stop();
         try {
-          await lspManager.start(projectConfig.language, projectConfig.command, projectConfig.args);
+          await lspManager.start(projectConfig.command, projectConfig.args);
           ctx.ui.notify("LSP restarted successfully.", "info");
           sendLspStatus(pi, {
             language: projectConfig.language,
@@ -401,7 +431,7 @@ export default function lspExtension(pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(
-        `Unknown LSP sub-command: ${subCommand}. Available: status, init, start, stop, restart`,
+        `Unknown LSP sub-command: ${subCommand}. Available: status, init, clean, restart`,
         "error",
       );
     },

@@ -1,9 +1,16 @@
+// Manages the language server process, file syncing, and diagnostics.
 import { type ChildProcess, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { JSONRPCEndpoint, LspClient } from "ts-lsp-client";
-import { IGNORE_DIRS, type ServersConfig } from "./heuristics.js";
+import { IGNORE_DIRS, type ServersConfig } from "./detector.js";
+import {
+  type LSPSymbol,
+  type LSPTextEdit,
+  type LSPWorkspaceEdit,
+  LspClient,
+  LspJSONRPCEndpoint,
+} from "./protocol.js";
 
 // Convert a file path to a file:// URL string
 export function pathToUri(workspaceDir: string, filePath: string): string {
@@ -107,27 +114,30 @@ export interface FormattedDiagnostic {
   message: string;
 }
 
+interface LanguageAdapter {
+  triggerDiagnostics?: (endpoint: LspJSONRPCEndpoint, absolutePath: string) => Promise<void>;
+}
+
+const LANGUAGE_ADAPTERS: Record<string, LanguageAdapter> = {};
+
 export class LspClientManager {
   private process: ChildProcess | null = null;
-  private endpoint: JSONRPCEndpoint | null = null;
+  private endpoint: LspJSONRPCEndpoint | null = null;
   private client: LspClient | null = null;
-  private diagnostics: Map<string, DiagnosticInfo[]> = new Map();
-  private openedFiles: Set<string> = new Set();
-  private activeLanguage: string | null = null;
-  private workspaceDir: string;
+  private readonly diagnostics: Map<string, DiagnosticInfo[]> = new Map();
+  private readonly openedFiles: Set<string> = new Set();
+  private readonly documentVersions: Map<string, number> = new Map();
+  private readonly syncQueue: Map<string, Promise<void>> = new Map();
+  private readonly workspaceDir: string;
   private isConnected = false;
-  private config: ServersConfig | null = null;
-  private diagnosticResolvers: Map<string, (() => void)[]> = new Map();
+  public config: ServersConfig | null = null;
+  private readonly diagnosticResolvers: Map<string, (() => void)[]> = new Map();
 
   constructor(workspaceDir: string, config?: ServersConfig | null) {
     this.workspaceDir = workspaceDir;
     if (config) {
       this.config = config;
     }
-  }
-
-  getRunningLanguage(): string | null {
-    return this.activeLanguage;
   }
 
   isServerRunning(): boolean {
@@ -161,25 +171,59 @@ export class LspClientManager {
     });
   }
 
+  async pullDiagnostics(filePath: string): Promise<boolean> {
+    if (!this.isServerRunning() || !this.endpoint) return false;
+
+    const uri = pathToUri(this.workspaceDir, filePath);
+    const timeout = this.config?.defaultTimeoutMs ?? 15000;
+    try {
+      const result = await this.executeWithTimeout<{
+        kind: string;
+        items: DiagnosticInfo[];
+      }>(
+        this.endpoint.send("textDocument/diagnostic", {
+          textDocument: { uri },
+        }),
+        timeout,
+      );
+
+      if (result && result.kind === "full" && Array.isArray(result.items)) {
+        this.diagnostics.set(uri, result.items);
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+
   // Spawn the LSP server process and initialize the RPC connection
-  async start(language: string, command: string, args: string[]): Promise<void> {
+  async start(command: string, args: string[]): Promise<void> {
     if (this.isServerRunning()) {
       await this.stop();
     }
 
-    this.activeLanguage = language;
     this.diagnostics.clear();
     this.openedFiles.clear();
+    this.documentVersions.clear();
+    this.syncQueue.clear();
 
     try {
+      const env = { ...process.env };
+      delete env.NODE_OPTIONS;
+
       this.process = spawn(command, args, {
         cwd: this.workspaceDir,
-        env: process.env,
+        env,
         stdio: ["pipe", "pipe", "pipe"],
       });
 
       this.process.on("error", (err) => {
         console.error(`[LSP Client] Process spawn error:`, err);
+      });
+
+      this.process.stderr?.on("data", (data) => {
+        console.error(`[LSP Server Stderr] ${data.toString().trim()}`);
       });
 
       // Avoid blocking process exits
@@ -189,50 +233,12 @@ export class LspClientManager {
         throw new Error("LSP process spawned without stdin or stdout pipes.");
       }
 
-      this.endpoint = new JSONRPCEndpoint(this.process.stdin, this.process.stdout);
+      this.endpoint = new LspJSONRPCEndpoint(this.process.stdin, this.process.stdout);
 
       // Handle general JSON-RPC endpoint errors to prevent crashing the extension process
       this.endpoint.on("error", (err) => {
         console.error(`[LSP Client] JSONRPC Endpoint error:`, err);
       });
-
-      // Patch the JSONRPCEndpoint to allow asynchronous, out-of-order responses.
-      // The ts-lsp-client library incorrectly checks that the incoming response ID matches
-      // the single most recently sent request (nextId - 1), which breaks concurrent requests.
-      // biome-ignore lint/suspicious/noExplicitAny: patching internal properties of JSONRPCEndpoint
-      const rawEndpoint = this.endpoint as any;
-      if (rawEndpoint.readableByline && rawEndpoint.client) {
-        rawEndpoint.readableByline.removeAllListeners("data");
-        rawEndpoint.readableByline.on("data", (jsonRPCResponseOrRequest: string) => {
-          try {
-            const jsonrpc = JSON.parse(jsonRPCResponseOrRequest);
-            // Check if it's a response (has id and result/error properties)
-            if (
-              Object.hasOwn(jsonrpc, "id") &&
-              (Object.hasOwn(jsonrpc, "result") || Object.hasOwn(jsonrpc, "error"))
-            ) {
-              rawEndpoint.client.receive(jsonrpc);
-            }
-            // It's a request or notification (has method property)
-            else if (Object.hasOwn(jsonrpc, "method")) {
-              if (Object.hasOwn(jsonrpc, "id")) {
-                rawEndpoint.emit(jsonrpc.method, jsonrpc.params, jsonrpc.id);
-              } else {
-                rawEndpoint.emit(jsonrpc.method, jsonrpc.params);
-              }
-            } else {
-              rawEndpoint.emit(
-                "error",
-                new Error(
-                  `[transform] Received invalid JSON-RPC message: ${jsonRPCResponseOrRequest}`,
-                ),
-              );
-            }
-          } catch (err) {
-            rawEndpoint.emit("error", err);
-          }
-        });
-      }
 
       this.endpoint.on(
         "textDocument/publishDiagnostics",
@@ -301,10 +307,8 @@ export class LspClientManager {
             return null;
           });
 
-          // biome-ignore lint/suspicious/noExplicitAny: patching internal properties of JSONRPCEndpoint
-          const rawEndpoint = this.endpoint as any;
-          if (rawEndpoint && typeof rawEndpoint.respondToRequest === "function") {
-            rawEndpoint.respondToRequest(id, result);
+          if (this.endpoint) {
+            this.endpoint.respondToRequest(id, result);
           }
         },
       );
@@ -317,11 +321,24 @@ export class LspClientManager {
         processId: process.pid,
         rootUri,
         rootPath: this.workspaceDir,
+        workspaceFolders: [
+          {
+            uri: rootUri,
+            name: path.basename(this.workspaceDir),
+          },
+        ],
         capabilities: {
           workspace: {
+            workspaceFolders: true,
             configuration: true,
             didChangeConfiguration: {
               dynamicRegistration: true,
+            },
+            symbol: {
+              dynamicRegistration: true,
+            },
+            workspaceEdit: {
+              documentChanges: true,
             },
           },
           textDocument: {
@@ -347,6 +364,10 @@ export class LspClientManager {
             documentSymbol: {
               dynamicRegistration: true,
               hierarchicalDocumentSymbolSupport: true,
+            },
+            rename: {
+              dynamicRegistration: true,
+              prepareSupport: true,
             },
           },
         },
@@ -391,32 +412,28 @@ export class LspClientManager {
           },
         },
       });
-
-      // Proactively sync at least one file to initialize the project context
-      // in language servers like tsserver (typescript-language-server).
-      this.findFirstLanguageFile(this.workspaceDir)
-        .then((firstFile) => {
-          if (firstFile) {
-            this.syncFile(firstFile).catch(() => {});
-          }
-        })
-        .catch(() => {});
     } catch (error) {
       this.isConnected = false;
-      this.activeLanguage = null;
       throw new Error(`Failed to start language server (${command}): ${error}`);
     }
   }
 
   async stop(): Promise<void> {
     this.isConnected = false;
-    this.activeLanguage = null;
     this.diagnostics.clear();
     this.openedFiles.clear();
+    this.documentVersions.clear();
+    this.syncQueue.clear();
 
     if (this.client) {
       try {
-        await this.client.shutdown();
+        const shutdownPromise = this.client.shutdown();
+        let timeoutId: NodeJS.Timeout | undefined;
+        const timeoutPromise = new Promise<void>((resolve) => {
+          timeoutId = setTimeout(resolve, 2000);
+        });
+        await Promise.race([shutdownPromise, timeoutPromise]);
+        if (timeoutId) clearTimeout(timeoutId);
         this.client.exit();
       } catch {
         // Best effort shutdown
@@ -435,73 +452,85 @@ export class LspClientManager {
   /**
    * Sync document state with LSP server (used on file read/write/edit events)
    */
-  async syncFile(filePath: string): Promise<void> {
+  async syncFile(filePath: string, text?: string): Promise<void> {
+    const absolutePath = path.isAbsolute(filePath)
+      ? filePath
+      : path.resolve(this.workspaceDir, filePath);
+    const uri = pathToFileURL(absolutePath).href;
+
+    const currentPromise = this.syncQueue.get(uri) ?? Promise.resolve();
+
+    const nextPromise = currentPromise
+      .then(async () => {
+        await this.doSyncFile(filePath, uri, absolutePath, text);
+      })
+      .catch((err) => {
+        console.error(`[LSP Client] Error syncing file ${filePath}:`, err);
+      });
+
+    this.syncQueue.set(uri, nextPromise);
+    return nextPromise;
+  }
+
+  private async doSyncFile(
+    filePath: string,
+    uri: string,
+    absolutePath: string,
+    text?: string,
+  ): Promise<void> {
     if (!this.isServerRunning() || !this.client) return;
 
     try {
-      const absolutePath = path.isAbsolute(filePath)
-        ? filePath
-        : path.resolve(this.workspaceDir, filePath);
-
-      // Ensure file exists
-      const content = await fs.readFile(absolutePath, "utf8");
-      const uri = pathToFileURL(absolutePath).href;
       const languageId = getLanguageId(filePath, this.config);
+      const content = text ?? (await fs.readFile(absolutePath, "utf8"));
 
-      // Re-open the file on the LSP server to force it to refresh contents
       if (this.openedFiles.has(uri)) {
-        this.client.didClose({ textDocument: { uri } });
+        const version = (this.documentVersions.get(uri) || 0) + 1;
+        this.documentVersions.set(uri, version);
+
+        this.endpoint?.notify("textDocument/didChange", {
+          textDocument: {
+            uri,
+            version,
+          },
+          contentChanges: [{ text: content }],
+        });
+      } else {
+        const version = 1;
+        this.documentVersions.set(uri, version);
+        this.openedFiles.add(uri);
+
+        this.client.didOpen({
+          textDocument: {
+            uri,
+            languageId,
+            version,
+            text: content,
+          },
+        });
       }
-
-      this.client.didOpen({
-        textDocument: {
-          uri,
-          languageId,
-          version: Date.now(),
-          text: content,
-        },
-      });
-
-      this.openedFiles.add(uri);
     } catch {
       // Ignore sync errors (e.g. file deleted or missing)
     }
   }
 
-  /**
-   * Helper to scan workspace and find the first file belonging to the active language
-   */
-  async findFirstLanguageFile(dir: string): Promise<string | null> {
-    if (!this.activeLanguage) return null;
-    const targetLang = this.activeLanguage;
-
-    const walk = async (currentDir: string, depth = 0): Promise<string | null> => {
-      if (depth > 4) return null;
-      try {
-        const entries = await fs.readdir(currentDir, { withFileTypes: true });
-        // Check files in the current directory first
-        for (const entry of entries) {
-          if (entry.isFile()) {
-            const fullPath = path.join(currentDir, entry.name);
-            if (getLanguageId(fullPath, this.config) === targetLang) {
-              return fullPath;
-            }
-          }
-        }
-        // Then recurse into subdirectories
-        for (const entry of entries) {
-          if (entry.isDirectory() && !IGNORE_DIRS.has(entry.name)) {
-            const found = await walk(path.join(currentDir, entry.name), depth + 1);
-            if (found) return found;
-          }
-        }
-      } catch {
-        // Ignore read errors
-      }
-      return null;
-    };
-
-    return walk(dir);
+  // Helper to execute any promise with a timeout
+  private async executeWithTimeout<T>(
+    promise: PromiseLike<T> | Promise<T>,
+    timeoutMs = 15000,
+    errorMessage = "LSP request timed out",
+  ): Promise<T> {
+    let timeoutId: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(errorMessage));
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
   }
 
   // --- LSP Operations ---
@@ -515,10 +544,15 @@ export class LspClientManager {
     const uri = pathToUri(this.workspaceDir, filePath);
 
     // LSP positions are 0-indexed
-    const result = await this.client.hover({
-      textDocument: { uri },
-      position: { line: line - 1, character: character - 1 },
-    });
+    const timeout = this.config?.defaultTimeoutMs ?? 15000;
+    const result = await this.executeWithTimeout(
+      this.client.hover({
+        textDocument: { uri },
+        position: { line: line - 1, character: character - 1 },
+      }),
+      timeout,
+      `Hover request timed out after ${timeout / 1000} seconds`,
+    );
 
     if (!result?.contents) {
       return "No hover information available.";
@@ -557,10 +591,15 @@ export class LspClientManager {
     await this.syncFile(filePath);
     const uri = pathToUri(this.workspaceDir, filePath);
 
-    const result = await this.client.definition({
-      textDocument: { uri },
-      position: { line: line - 1, character: character - 1 },
-    });
+    const timeout = this.config?.defaultTimeoutMs ?? 15000;
+    const result = await this.executeWithTimeout(
+      this.client.definition({
+        textDocument: { uri },
+        position: { line: line - 1, character: character - 1 },
+      }),
+      timeout,
+      `Go-to-definition request timed out after ${timeout / 1000} seconds`,
+    );
 
     if (!result) return null;
 
@@ -597,11 +636,16 @@ export class LspClientManager {
     await this.syncFile(filePath);
     const uri = pathToUri(this.workspaceDir, filePath);
 
-    const result = await this.client.references({
-      textDocument: { uri },
-      position: { line: line - 1, character: character - 1 },
-      context: { includeDeclaration: true },
-    });
+    const timeout = this.config?.defaultTimeoutMs ?? 15000;
+    const result = await this.executeWithTimeout(
+      this.client.references({
+        textDocument: { uri },
+        position: { line: line - 1, character: character - 1 },
+        context: { includeDeclaration: true },
+      }),
+      timeout,
+      `Find-references request timed out after ${timeout / 1000} seconds`,
+    );
 
     if (!result || "message" in result) return [];
 
@@ -620,9 +664,14 @@ export class LspClientManager {
     await this.syncFile(filePath);
     const uri = pathToUri(this.workspaceDir, filePath);
 
-    const result = await this.client.documentSymbol({
-      textDocument: { uri },
-    });
+    const timeout = this.config?.defaultTimeoutMs ?? 15000;
+    const result = await this.executeWithTimeout(
+      this.client.documentSymbol({
+        textDocument: { uri },
+      }),
+      timeout,
+      `Document-symbols request timed out after ${timeout / 1000} seconds`,
+    );
 
     if (!result) return [];
 
@@ -630,7 +679,7 @@ export class LspClientManager {
 
     // Normalize DocumentSymbol[] | SymbolInformation[]
     for (const sym of result) {
-      if ("range" in sym) {
+      if (sym.range) {
         // DocumentSymbol
         symbols.push({
           name: sym.name,
@@ -638,7 +687,7 @@ export class LspClientManager {
           line: sym.range.start.line + 1,
           detail: sym.detail,
         });
-      } else {
+      } else if (sym.location) {
         // SymbolInformation
         symbols.push({
           name: sym.name,
@@ -692,6 +741,15 @@ export class LspClientManager {
     symbolName: string,
     line?: number,
   ): Promise<{ line: number; character: number }[]> {
+    try {
+      const lspCoords = await this.findCoordinatesFromLsp(filePath, symbolName, line);
+      if (lspCoords.length > 0) {
+        return lspCoords;
+      }
+    } catch (err) {
+      console.warn(`[LSP Client] AST coordinate lookup failed, falling back to text scan:`, err);
+    }
+
     const absolutePath = path.isAbsolute(filePath)
       ? filePath
       : path.resolve(this.workspaceDir, filePath);
@@ -771,33 +829,12 @@ export class LspClientManager {
     }
 
     const endpoint = this.endpoint;
-    const executeRequest = async () => {
-      // biome-ignore lint/suspicious/noExplicitAny: endpoint response type is not generic in library
-      return (await endpoint.send("workspace/symbol", { query })) as any;
-    };
-
-    // biome-ignore lint/suspicious/noExplicitAny: result of JSON-RPC request
-    let result: any;
-    try {
-      result = await executeRequest();
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes("No Project") && this.openedFiles.size === 0) {
-        console.log(
-          `[LSP Client] Workspace symbol search failed with 'No Project'. Attempting to initialize project by syncing a workspace file...`,
-        );
-        const firstFile = await this.findFirstLanguageFile(this.workspaceDir);
-        if (firstFile) {
-          await this.syncFile(firstFile);
-          // Retry the request once
-          result = await executeRequest();
-        } else {
-          throw err;
-        }
-      } else {
-        throw err;
-      }
-    }
+    const timeout = this.config?.workspaceSearchTimeoutMs ?? 45000;
+    const result = await this.executeWithTimeout(
+      endpoint.send<LSPSymbol[]>("workspace/symbol", { query }),
+      timeout,
+      `Workspace symbol search timed out after ${timeout / 1000} seconds`,
+    );
 
     if (!result) return [];
 
@@ -834,11 +871,16 @@ export class LspClientManager {
     await this.syncFile(filePath);
     const uri = pathToUri(this.workspaceDir, filePath);
 
-    const result = await this.endpoint.send("textDocument/rename", {
-      textDocument: { uri },
-      position: { line: line - 1, character: character - 1 },
-      newName,
-    });
+    const timeout = this.config?.defaultTimeoutMs ?? 15000;
+    const result = await this.executeWithTimeout(
+      this.endpoint.send("textDocument/rename", {
+        textDocument: { uri },
+        position: { line: line - 1, character: character - 1 },
+        newName,
+      }),
+      timeout,
+      `Rename-symbol request timed out after ${timeout / 1000} seconds`,
+    );
 
     return result;
   }
@@ -847,18 +889,17 @@ export class LspClientManager {
    * Apply workspace edits and return file changes statistics
    */
   // Parse and apply workspace edits sent by the LSP server (e.g. for rename)
-  // biome-ignore lint/suspicious/noExplicitAny: edit payload parameter is external
-  async applyWorkspaceEdit(edit: any): Promise<Record<string, { count: number; lines: number[] }>> {
+  async applyWorkspaceEdit(
+    edit: LSPWorkspaceEdit,
+  ): Promise<Record<string, { count: number; lines: number[] }>> {
     if (!edit) return {};
 
-    // biome-ignore lint/suspicious/noExplicitAny: edits can contain complex ranges
-    const fileEditsMap: Map<string, { range: any; newText: string }[]> = new Map();
+    const fileEditsMap: Map<string, LSPTextEdit[]> = new Map();
 
     if (edit.changes) {
       for (const [uri, edits] of Object.entries(edit.changes)) {
         const filePath = fileURLToPath(uri);
-        // biome-ignore lint/suspicious/noExplicitAny: casting edits array
-        fileEditsMap.set(filePath, edits as any);
+        fileEditsMap.set(filePath, edits);
       }
     } else if (edit.documentChanges) {
       for (const docChange of edit.documentChanges) {
@@ -904,8 +945,9 @@ export class LspClientManager {
         fileLines.splice(startLine, endLine - startLine + 1, ...replacementLines);
       }
 
-      await fs.writeFile(filePath, fileLines.join("\n"), "utf8");
-      await this.syncFile(filePath);
+      const updatedText = fileLines.join("\n");
+      await fs.writeFile(filePath, updatedText, "utf8");
+      await this.syncFile(filePath, updatedText);
 
       const relPath = path.relative(this.workspaceDir, filePath);
       stats[relPath] = {
@@ -915,5 +957,176 @@ export class LspClientManager {
     }
 
     return stats;
+  }
+
+  /**
+   * Resolve precise symbol coordinates from LSP AST symbols rather than regex
+   */
+  private async findCoordinatesFromLsp(
+    filePath: string,
+    symbolName: string,
+    line?: number,
+  ): Promise<{ line: number; character: number }[]> {
+    if (!this.isServerRunning() || !this.client) {
+      return [];
+    }
+
+    await this.syncFile(filePath);
+    const absolutePath = path.isAbsolute(filePath)
+      ? filePath
+      : path.resolve(this.workspaceDir, filePath);
+    const uri = pathToFileURL(absolutePath).href;
+
+    const timeout = this.config?.defaultTimeoutMs ?? 15000;
+    const rawSymbols = (await this.executeWithTimeout(
+      this.client.documentSymbol({
+        textDocument: { uri },
+      }),
+      timeout,
+      `Document-symbols coordinate lookup timed out`,
+    ).catch(() => null)) as LSPSymbol[] | null;
+
+    if (!rawSymbols) return [];
+
+    interface LspCoordinate {
+      line: number;
+      character: number;
+    }
+
+    interface FlattenedSymbol {
+      name: string;
+      kind: number;
+      start: LspCoordinate;
+    }
+
+    const flattened: FlattenedSymbol[] = [];
+
+    function traverse(sym: LSPSymbol) {
+      if (sym.selectionRange) {
+        flattened.push({
+          name: sym.name,
+          kind: sym.kind,
+          start: {
+            line: sym.selectionRange.start.line + 1,
+            character: sym.selectionRange.start.character + 1,
+          },
+        });
+        if (sym.children && Array.isArray(sym.children)) {
+          for (const child of sym.children) {
+            traverse(child);
+          }
+        }
+      } else if (sym.location) {
+        flattened.push({
+          name: sym.name,
+          kind: sym.kind,
+          start: {
+            line: sym.location.range.start.line + 1,
+            character: sym.location.range.start.character + 1,
+          },
+        });
+      }
+    }
+
+    for (const sym of rawSymbols) {
+      traverse(sym);
+    }
+
+    const matchSymbol = (symName: string, targetName: string) => {
+      if (symName === targetName) return true;
+      if (symName.endsWith(`.${targetName}`)) return true;
+      if (symName.endsWith(`::${targetName}`)) return true;
+      return false;
+    };
+
+    const matches: { line: number; character: number }[] = [];
+    for (const sym of flattened) {
+      if (matchSymbol(sym.name, symbolName)) {
+        if (line === undefined || sym.start.line === line) {
+          matches.push(sym.start);
+        }
+      }
+    }
+
+    return matches;
+  }
+
+  private async findFirstWorkspaceFile(): Promise<string | null> {
+    const extensions = new Set<string>();
+    if (this.config?.languages) {
+      for (const langConfig of Object.values(this.config.languages)) {
+        for (const ext of langConfig.fileExtensions) {
+          extensions.add(ext.toLowerCase());
+        }
+      }
+    } else {
+      for (const ext of Object.keys(DEFAULT_LANGUAGE_IDS)) {
+        extensions.add(ext.toLowerCase());
+      }
+    }
+
+    const walk = async (dir: string, depth = 0): Promise<string | null> => {
+      if (depth > 4) return null;
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isFile()) {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (extensions.has(ext)) {
+              return path.join(dir, entry.name);
+            }
+          }
+        }
+        for (const entry of entries) {
+          if (entry.isDirectory() && !IGNORE_DIRS.has(entry.name)) {
+            const found = await walk(path.join(dir, entry.name), depth + 1);
+            if (found) return found;
+          }
+        }
+      } catch {
+        // ignore
+      }
+      return null;
+    };
+
+    return walk(this.workspaceDir);
+  }
+
+  /**
+   * Triggers diagnostics compilation for the workspace.
+   * Adapts dynamically for lazy servers (e.g. TypeScript).
+   */
+  async triggerWorkspaceDiagnostics(filePath?: string): Promise<void> {
+    if (!this.isServerRunning() || !this.endpoint) return;
+
+    let target = filePath;
+    if (!target) {
+      const openedUri = this.openedFiles.values().next().value;
+      if (openedUri) {
+        target = uriToPath(openedUri);
+      }
+    }
+
+    if (!target) {
+      const firstFile = await this.findFirstWorkspaceFile();
+      if (firstFile) {
+        await this.syncFile(firstFile);
+        target = firstFile;
+      }
+    }
+
+    if (!target) return;
+
+    const absolutePath = path.isAbsolute(target) ? target : path.resolve(this.workspaceDir, target);
+    const langId = getLanguageId(absolutePath, this.config);
+
+    const adapter = LANGUAGE_ADAPTERS[langId];
+    if (adapter?.triggerDiagnostics) {
+      try {
+        await adapter.triggerDiagnostics(this.endpoint, absolutePath);
+      } catch (err) {
+        console.warn(`[LSP Client] Diagnostics trigger failed for ${langId}:`, err);
+      }
+    }
   }
 }

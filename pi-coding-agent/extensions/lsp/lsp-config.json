@@ -1,4 +1,7 @@
 {
+  "defaultLimit": 100,
+  "defaultTimeoutMs": 15000,
+  "workspaceSearchTimeoutMs": 45000,
   "languages": {
     "typescript": {
       "command": "typescript-language-server",

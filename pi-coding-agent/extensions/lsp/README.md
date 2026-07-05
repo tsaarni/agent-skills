@@ -23,19 +23,30 @@ Language server binaries must be in system `PATH`.
 | Rust | `rust-analyzer` | `Cargo.toml` | `.rs` |
 | Java | `jdtls` | `pom.xml`, `build.gradle`, `build.gradle.kts`, `settings.gradle`, `settings.gradle.kts` | `.java` |
 
-Language server commands are configurable in [`lsp-servers.json`](lsp-servers.json).
+Language server commands, default limits, and timeouts are configurable in [`lsp-config.json`](lsp-config.json).
 
 ## Slash Commands
 
 | Command | Description |
 |---|---|
 | `/lsp` or `/lsp status` | Show server status, config, and diagnostics summary |
-| `/lsp init` | Detect language, confirm with user, save config to `.pi/lsp-project.json`, and start server |
-| `/lsp start` | Start the server (requires prior `init`) |
-| `/lsp stop` | Stop the running server |
+| `/lsp init` | Detect language, confirm with user, save configuration globally, and start server |
+| `/lsp clean` | Remove global configuration and stop the server |
 | `/lsp restart` | Stop and restart the server |
 
-On session start, the extension reads `.pi/lsp-project.json` and auto-starts the server if a previous configuration exists.
+### Configuration Storage
+On session start, the extension looks for configuration in `<workspace-root>/.pi/lsp.json` first. If not found, it falls back to the global path `~/.pi/agent/lsp-extension/--<encoded-workspace-path>--/lsp.json`.
+
+New configurations written by `/lsp init` are saved to the global path to keep the workspace clean.
+
+**Example `lsp.json`:**
+```json
+{
+  "autostart": true,
+  "command": "typescript-language-server",
+  "args": ["--stdio"]
+}
+```
 
 ## Tools
 

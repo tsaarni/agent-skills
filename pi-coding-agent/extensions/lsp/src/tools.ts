@@ -1,8 +1,29 @@
+// Registers extension tools to query the language server.
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
-import { isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { LspClientManager, SymbolInfo } from "./client.js";
+import type { LspClientManager, SymbolInfo } from "./manager.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function loadConfigSync() {
+  const pathsToTry = [join(__dirname, "../lsp-config.json"), join(__dirname, "lsp-config.json")];
+  for (const p of pathsToTry) {
+    try {
+      const data = fsSync.readFileSync(p, "utf8");
+      return JSON.parse(data);
+    } catch {
+      // Continue
+    }
+  }
+  return null;
+}
+
+const configSync = loadConfigSync();
+const defaultLimit = configSync?.defaultLimit ?? 100;
 
 async function getCodeSnippet(
   workspaceDir: string,
@@ -30,6 +51,59 @@ function getMarkdownLanguage(filePath: string): string {
   if (ext === "rs") return "rust";
   if (ext === "go") return "go";
   return "";
+}
+
+function toRelativePath(cwd: string, filePath?: string, fallback = ""): string {
+  if (!filePath) {
+    return fallback;
+  }
+  return isAbsolute(filePath) ? relative(cwd, filePath) : filePath;
+}
+
+function compactHoverText(hoverText: string): string {
+  if (!hoverText) return "";
+
+  const lines = hoverText.split(/\r?\n/);
+  const compactedLines: string[] = [];
+  let inCodeBlock = false;
+  let codeBlockLineCount = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+
+    if (line.startsWith("```")) {
+      inCodeBlock = !inCodeBlock;
+      codeBlockLineCount = 0;
+      compactedLines.push(line);
+      continue;
+    }
+
+    if (inCodeBlock) {
+      if (codeBlockLineCount < 15) {
+        compactedLines.push(lines[i]);
+        codeBlockLineCount++;
+      } else if (codeBlockLineCount === 15) {
+        compactedLines.push("  ... [signature truncated]");
+        codeBlockLineCount++;
+      }
+      continue;
+    }
+
+    if (!line) {
+      if (compactedLines.length > 0 && compactedLines[compactedLines.length - 1] !== "") {
+        compactedLines.push("");
+      }
+      continue;
+    }
+
+    if (line.length > 300) {
+      compactedLines.push(`${line.slice(0, 300)} ... [truncated]`);
+    } else {
+      compactedLines.push(line);
+    }
+  }
+
+  return compactedLines.join("\n").trim();
 }
 
 export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClientManager | null) {
@@ -63,9 +137,7 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
       }
 
       try {
-        const relFile = isAbsolute(params.filePath)
-          ? relative(ctx.cwd, params.filePath)
-          : params.filePath;
+        const relFile = toRelativePath(ctx.cwd, params.filePath);
 
         const coords = await lspManager.findSymbolCoordinates(
           params.filePath,
@@ -92,6 +164,7 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
           const [hoverText, locations] = await Promise.all([
             lspManager
               .getHover(params.filePath, coord.line, coord.character)
+              .then(compactHoverText)
               .catch((err) => `No doc: ${err.message}`),
             lspManager
               .getDefinition(params.filePath, coord.line, coord.character)
@@ -106,9 +179,7 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
           if (locations && locations.length > 0) {
             for (const loc of locations) {
               const snippet = await getCodeSnippet(ctx.cwd, loc.filePath, loc.line);
-              const relPath = isAbsolute(loc.filePath)
-                ? relative(ctx.cwd, loc.filePath)
-                : loc.filePath;
+              const relPath = toRelativePath(ctx.cwd, loc.filePath);
               block += `Definition: ${relPath}:${loc.line}\n`;
               if (snippet) {
                 const lang = getMarkdownLanguage(loc.filePath);
@@ -158,6 +229,11 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
           description: "1-indexed line number of the symbol.",
         }),
       ),
+      offset: Type.Optional(
+        Type.Integer({
+          description: "1-based starting index (default is 1).",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const lspManager = getLspManager();
@@ -170,9 +246,7 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
       }
 
       try {
-        const relFile = isAbsolute(params.filePath)
-          ? relative(ctx.cwd, params.filePath)
-          : params.filePath;
+        const relFile = toRelativePath(ctx.cwd, params.filePath);
 
         const coords = await lspManager.findSymbolCoordinates(
           params.filePath,
@@ -205,14 +279,30 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
           };
         }
 
-        const refStrings = references.map((ref) => {
-          const relPath = isAbsolute(ref.filePath) ? relative(ctx.cwd, ref.filePath) : ref.filePath;
-          return `${relPath}:${ref.line}`;
-        });
+        const limit = defaultLimit;
+        const offset = Math.max(1, params.offset ?? 1);
+        const totalCount = references.length;
+        const paginatedReferences = references.slice(offset - 1, offset - 1 + limit);
+        const remainingCount = totalCount - (offset - 1 + paginatedReferences.length);
+
+        const refStrings: string[] = [];
+        for (const ref of paginatedReferences) {
+          const relPath = toRelativePath(ctx.cwd, ref.filePath);
+          const codeLine = await getCodeSnippet(ctx.cwd, ref.filePath, ref.line, 1);
+          const snippetPart = codeLine ? `: ${codeLine.trim()}` : "";
+          refStrings.push(`${relPath}:${ref.line}${snippetPart}`);
+        }
+
+        let output = refStrings.join("\n");
+        if (remainingCount > 0) {
+          output += `\n\nShowing matches ${offset}-${offset + paginatedReferences.length - 1} of ${totalCount}. Use offset: ${offset + limit} to get more.`;
+        } else if (offset > 1 && paginatedReferences.length > 0) {
+          output += `\n\nShowing matches ${offset}-${offset + paginatedReferences.length - 1} of ${totalCount}.`;
+        }
 
         return {
-          content: [{ type: "text", text: refStrings.join("\n") }],
-          details: { references },
+          content: [{ type: "text", text: output }],
+          details: { references: paginatedReferences },
         };
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -243,6 +333,11 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
             "Query to search for symbols by name or kind (supported kinds: class, interface, function, method, variable, const, constant, type, enum, struct).",
         }),
       ),
+      offset: Type.Optional(
+        Type.Integer({
+          description: "1-based starting index (default is 1).",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const lspManager = getLspManager();
@@ -266,7 +361,10 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         }
 
         let symbols: SymbolInfo[] = [];
+        let paginatedSymbols: SymbolInfo[] = [];
         let output = "";
+        const limit = defaultLimit;
+        const offset = Math.max(1, params.offset ?? 1);
 
         const kindKeywords: Record<string, string[]> = {
           class: ["Class"],
@@ -282,9 +380,7 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         };
 
         if (params.filePath) {
-          const relFile = isAbsolute(params.filePath)
-            ? relative(ctx.cwd, params.filePath)
-            : params.filePath;
+          const relFile = toRelativePath(ctx.cwd, params.filePath);
 
           // List / search symbols within a specific file
           const fileSymbols = await lspManager.getSymbols(params.filePath);
@@ -315,25 +411,30 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
             };
           }
 
-          const symbolStrings = symbols.map((sym) => {
+          paginatedSymbols = symbols.slice(offset - 1, offset - 1 + limit);
+          const totalCount = symbols.length;
+          const remainingCount = totalCount - (offset - 1 + paginatedSymbols.length);
+
+          const symbolStrings = paginatedSymbols.map((sym) => {
             const detailStr = sym.detail ? ` (${sym.detail})` : "";
             return `${relFile}:${sym.line}: ${sym.kind}: ${sym.name}${detailStr}`;
           });
           output = symbolStrings.join("\n");
+          if (remainingCount > 0) {
+            output += `\n\nShowing matches ${offset}-${offset + paginatedSymbols.length - 1} of ${totalCount} symbols in this file. Use offset: ${offset + limit} to get more.`;
+          } else if (offset > 1 && paginatedSymbols.length > 0) {
+            output += `\n\nShowing matches ${offset}-${offset + paginatedSymbols.length - 1} of ${totalCount} symbols in this file.`;
+          }
         } else if (params.query) {
           // Search workspace symbols
           const queryLower = params.query.toLowerCase().trim();
           const targetKinds = kindKeywords[queryLower];
 
           if (targetKinds) {
-            // If the query is a kind keyword, retrieve all symbols and filter by kind
-            const allSymbols = await lspManager.getWorkspaceSymbols("");
-            symbols = allSymbols.filter((sym) => targetKinds.includes(sym.kind));
-
-            // Fallback to standard query search if empty query was not supported/returned nothing
-            if (symbols.length === 0) {
-              symbols = await lspManager.getWorkspaceSymbols(params.query);
-            }
+            // Retrieve symbols matching the keyword query itself, and filter by kind.
+            // Avoid querying with empty string ("") as it hangs/fails on large workspaces.
+            const querySymbols = await lspManager.getWorkspaceSymbols(params.query);
+            symbols = querySymbols.filter((sym) => targetKinds.includes(sym.kind));
           } else {
             symbols = await lspManager.getWorkspaceSymbols(params.query);
           }
@@ -347,21 +448,26 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
             };
           }
 
-          const symbolStrings = symbols.map((sym) => {
-            const relPath = sym.filePath
-              ? isAbsolute(sym.filePath)
-                ? relative(ctx.cwd, sym.filePath)
-                : sym.filePath
-              : "unknown";
+          paginatedSymbols = symbols.slice(offset - 1, offset - 1 + limit);
+          const totalCount = symbols.length;
+          const remainingCount = totalCount - (offset - 1 + paginatedSymbols.length);
+
+          const symbolStrings = paginatedSymbols.map((sym) => {
+            const relPath = toRelativePath(ctx.cwd, sym.filePath, "unknown");
             const detailStr = sym.detail ? ` (${sym.detail})` : "";
             return `${relPath}:${sym.line}: ${sym.kind}: ${sym.name}${detailStr}`;
           });
           output = symbolStrings.join("\n");
+          if (remainingCount > 0) {
+            output += `\n\nShowing matches ${offset}-${offset + paginatedSymbols.length - 1} of ${totalCount}. Use offset: ${offset + limit} to get more.`;
+          } else if (offset > 1 && paginatedSymbols.length > 0) {
+            output += `\n\nShowing matches ${offset}-${offset + paginatedSymbols.length - 1} of ${totalCount}.`;
+          }
         }
 
         return {
           content: [{ type: "text", text: output }],
-          details: { symbols },
+          details: { symbols: paginatedSymbols },
         };
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -387,6 +493,11 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
             "Path to a file to get diagnostics for. If omitted, returns all workspace diagnostics.",
         }),
       ),
+      offset: Type.Optional(
+        Type.Integer({
+          description: "1-based starting index (default is 1).",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const lspManager = getLspManager();
@@ -399,9 +510,16 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
       }
 
       try {
+        await lspManager.triggerWorkspaceDiagnostics(params.filePath);
         if (params.filePath) {
           await lspManager.syncFile(params.filePath);
-          await lspManager.waitForDiagnostics(params.filePath);
+          const pulled = await lspManager.pullDiagnostics(params.filePath);
+          if (!pulled) {
+            await lspManager.waitForDiagnostics(params.filePath);
+          }
+        } else {
+          // Wait a short duration for the background diagnostics compilation to process
+          await new Promise((resolve) => setTimeout(resolve, 2000));
         }
 
         const diagMap = lspManager.getDiagnostics(params.filePath);
@@ -409,18 +527,23 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         const diagLines: string[] = [];
         for (const [relPath, list] of Object.entries(diagMap)) {
           if (list.length === 0) continue;
-          const relFile = isAbsolute(relPath) ? relative(ctx.cwd, relPath) : relPath;
+          const relFile = toRelativePath(ctx.cwd, relPath);
           for (const d of list) {
-            diagLines.push(`${relFile}:${d.line}: ${d.severity}: ${d.message}`);
+            // Filter out Info and Hint diagnostics by default to keep signal high
+            if (d.severity === "Information" || d.severity === "Hint") {
+              continue;
+            }
+            let block = `${relFile}:${d.line}: ${d.severity}: ${d.message}`;
+            const codeLine = await getCodeSnippet(ctx.cwd, relPath, d.line, 1);
+            if (codeLine) {
+              block += `\n  > ${codeLine.trim()}`;
+            }
+            diagLines.push(block);
           }
         }
 
         if (diagLines.length === 0) {
-          const target = params.filePath
-            ? isAbsolute(params.filePath)
-              ? relative(ctx.cwd, params.filePath)
-              : params.filePath
-            : "";
+          const target = toRelativePath(ctx.cwd, params.filePath);
           const scope = target ? `file: ${target}` : "workspace";
           return {
             content: [{ type: "text", text: `No diagnostics (clean code!) for ${scope}.` }],
@@ -428,8 +551,21 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
           };
         }
 
+        const limit = defaultLimit;
+        const offset = Math.max(1, params.offset ?? 1);
+        const totalCount = diagLines.length;
+        const paginatedDiags = diagLines.slice(offset - 1, offset - 1 + limit);
+        const remainingCount = totalCount - (offset - 1 + paginatedDiags.length);
+
+        let output = paginatedDiags.join("\n");
+        if (remainingCount > 0) {
+          output += `\n\nShowing matches ${offset}-${offset + paginatedDiags.length - 1} of ${totalCount}. Use offset: ${offset + limit} to get more.`;
+        } else if (offset > 1 && paginatedDiags.length > 0) {
+          output += `\n\nShowing matches ${offset}-${offset + paginatedDiags.length - 1} of ${totalCount}.`;
+        }
+
         return {
-          content: [{ type: "text", text: diagLines.join("\n") }],
+          content: [{ type: "text", text: output }],
           details: { diagnostics: diagMap },
         };
       } catch (err) {
@@ -459,9 +595,11 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
       newName: Type.String({
         description: "The new name for the symbol.",
       }),
-      line: Type.Integer({
-        description: "1-indexed line number where the target symbol is declared.",
-      }),
+      line: Type.Optional(
+        Type.Integer({
+          description: "1-indexed line number where the target symbol is declared.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const lspManager = getLspManager();
@@ -474,9 +612,7 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
       }
 
       try {
-        const relFile = isAbsolute(params.filePath)
-          ? relative(ctx.cwd, params.filePath)
-          : params.filePath;
+        const relFile = toRelativePath(ctx.cwd, params.filePath);
 
         const coords = await lspManager.findSymbolCoordinates(
           params.filePath,
@@ -536,7 +672,7 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         const totalReplacementsLabel = totalReplacements === 1 ? "replacement" : "replacements";
 
         const changesLines = modifiedFiles.map(([file, stat]) => {
-          const relFile = isAbsolute(file) ? relative(ctx.cwd, file) : file;
+          const relFile = toRelativePath(ctx.cwd, file);
           const countLabel = stat.count === 1 ? "replacement" : "replacements";
           const lineLabel = stat.lines.length === 1 ? "line" : "lines";
           return `${relFile}: ${stat.count} ${countLabel} on ${lineLabel} ${stat.lines.join(", ")}`;
