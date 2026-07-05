@@ -5,9 +5,9 @@ import * as path from "node:path";
 export interface LanguageConfig {
   command: string;
   args: string[];
-  fileExtensions: string[];
-  heuristics: {
+  detection: {
     files: string[];
+    extensions: string[];
   };
 }
 
@@ -44,8 +44,8 @@ async function checkRootFiles(workspaceDir: string, config: ServersConfig): Prom
 
     for (const [langName, langConfig] of Object.entries(config.languages)) {
       let matches = 0;
-      for (const hFile of langConfig.heuristics.files) {
-        if (fileSet.has(hFile)) {
+      for (const detFile of langConfig.detection.files) {
+        if (fileSet.has(detFile)) {
           matches++;
         }
       }
@@ -98,7 +98,7 @@ async function scanExtensions(workspaceDir: string, config: ServersConfig): Prom
 
   for (const [langName, langConfig] of Object.entries(config.languages)) {
     let score = 0;
-    for (const ext of langConfig.fileExtensions) {
+    for (const ext of langConfig.detection.extensions) {
       score += extensionCounts[ext] || 0;
     }
 
@@ -118,7 +118,7 @@ export async function detectWorkspaceLanguage(
   workspaceDir: string,
   config: ServersConfig,
 ): Promise<string | null> {
-  // 1. Try file signature heuristics at the root level (strongest signal)
+  // 1. Try file signature detection at the root level (strongest signal)
   const rootMatch = await checkRootFiles(workspaceDir, config);
   if (rootMatch) {
     return rootMatch;

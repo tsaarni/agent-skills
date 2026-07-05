@@ -1,4 +1,4 @@
-# LSP Extension Architecture
+# LSP Extension Design Document
 
 This document describes how the LSP extension coordinates file synchronization, workspace diagnostics, and language intelligence between the Pi Coding Agent and the Language Server Protocol (LSP) server.
 

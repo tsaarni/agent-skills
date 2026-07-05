@@ -1,39 +1,31 @@
 // Extension entry point that integrates the manager and registers event listeners.
 import * as fs from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 
 import { CONFIG_DIR_NAME, type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { detectWorkspaceLanguage, type ServersConfig } from "./detector.js";
+import { Type } from "typebox";
+import {
+  buildLspStatusMarkdown,
+  type LspStatus,
+  loadProjectLspConfig as loadProjectLspConfigGeneric,
+  loadServersConfig,
+  saveProjectLspConfig as saveProjectLspConfigGeneric,
+} from "./config.js";
+import { detectWorkspaceLanguage } from "./detector.js";
 import { LspClientManager } from "./manager.js";
-import { registerLspTools } from "./tools.js";
+import {
+  findReferences,
+  getDiagnostics,
+  getSymbolInfo,
+  renameSymbol,
+  searchSymbols,
+} from "./tools.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+export type { LspStatus };
 
 // Global active manager instance
 let lspManager: LspClientManager | null = null;
-let serversConfig: ServersConfig | null = null;
-
-// Read configuration mapping file
-async function loadServersConfig(): Promise<ServersConfig> {
-  if (serversConfig) return serversConfig;
-
-  // Search in extension dir or adjacent dir
-  const pathsToTry = [join(__dirname, "../lsp-config.json"), join(__dirname, "lsp-config.json")];
-
-  for (const p of pathsToTry) {
-    try {
-      const data = await fs.readFile(p, "utf8");
-      serversConfig = JSON.parse(data) as ServersConfig;
-      return serversConfig;
-    } catch {
-      // Continue
-    }
-  }
-
-  throw new Error("Could not load lsp-config.json config file");
-}
 
 function getLspProjectConfigPath(workspaceDir: string): string {
   const agentDir = getAgentDir();
@@ -43,64 +35,11 @@ function getLspProjectConfigPath(workspaceDir: string): string {
   return join(agentDir, "lsp-extension", safePath, "lsp.json");
 }
 
-async function resolveLanguageFromCommand(command: string): Promise<string> {
-  try {
-    const config = await loadServersConfig();
-    for (const [langId, langConfig] of Object.entries(config.languages)) {
-      if (langConfig.command === command || command.endsWith(langConfig.command)) {
-        return langId;
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return command;
-}
-
 // Load project initialization config if exists
-async function loadProjectLspConfig(workspaceDir: string): Promise<{
-  autostart: boolean;
-  language: string;
-  command: string;
-  args: string[];
-} | null> {
-  const parseConfig = async (
-    data: string,
-  ): Promise<{
-    autostart: boolean;
-    language: string;
-    command: string;
-    args: string[];
-  } | null> => {
-    const parsed = JSON.parse(data);
-    if (!parsed.command) return null;
-    let language = parsed.language;
-    if (!language) {
-      language = await resolveLanguageFromCommand(parsed.command);
-    }
-    return {
-      autostart: parsed.autostart ?? parsed.initialized ?? false,
-      language,
-      command: parsed.command,
-      args: parsed.args || [],
-    };
-  };
-
-  // 1. Try project-local config first
+async function loadProjectLspConfig(workspaceDir: string) {
   const projectConfigPath = join(workspaceDir, CONFIG_DIR_NAME, "lsp.json");
-  try {
-    const data = await fs.readFile(projectConfigPath, "utf8");
-    return await parseConfig(data);
-  } catch {
-    // 2. Fallback to global config
-    const globalConfigPath = getLspProjectConfigPath(workspaceDir);
-    try {
-      const data = await fs.readFile(globalConfigPath, "utf8");
-      return await parseConfig(data);
-    } catch {
-      return null;
-    }
-  }
+  const globalConfigPath = getLspProjectConfigPath(workspaceDir);
+  return loadProjectLspConfigGeneric(projectConfigPath, globalConfigPath);
 }
 
 // Save project initialization config
@@ -110,43 +49,7 @@ async function saveProjectLspConfig(
   args: string[],
 ): Promise<void> {
   const globalConfigPath = getLspProjectConfigPath(workspaceDir);
-  const globalConfigDir = dirname(globalConfigPath);
-  await fs.mkdir(globalConfigDir, { recursive: true });
-
-  const payload = {
-    autostart: true,
-    initializedAt: new Date().toISOString(),
-    command,
-    args,
-  };
-
-  await fs.writeFile(globalConfigPath, JSON.stringify(payload, null, 2), "utf8");
-}
-
-export interface LspStatus {
-  language: string;
-  command: string;
-  args: string[];
-  status: "running" | "error" | "not_initialized";
-  error?: string;
-  pid?: number | null;
-  syncedFilesCount?: number;
-  diagnosticsSummary?: string;
-}
-
-export function buildLspStatusMarkdown(s: LspStatus): string {
-  if (s.status === "running") {
-    let msg = `LSP: running (${s.language})`;
-    if (s.pid) msg += ` | pid: ${s.pid}`;
-    if (s.syncedFilesCount !== undefined) msg += ` | synced: ${s.syncedFilesCount}`;
-    if (s.diagnosticsSummary) msg += ` | ${s.diagnosticsSummary}`;
-    msg += ` — ${s.command} ${s.args.join(" ")}`;
-    return msg;
-  } else if (s.status === "error") {
-    return `LSP: failed to start (${s.language}) — ${s.error}`;
-  } else {
-    return `LSP: not initialized`;
-  }
+  return saveProjectLspConfigGeneric(globalConfigPath, command, args);
 }
 
 export function sendLspStatus(pi: ExtensionAPI, status: LspStatus): void {
@@ -351,7 +254,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 
           if (!detectedLang) {
             ctx.ui.notify(
-              "LSP Heuristics: Could not detect workspace language. No matching file pattern found.",
+              "LSP Detection: Could not detect workspace language. No matching file pattern found.",
               "warning",
             );
             return;
@@ -360,7 +263,7 @@ export default function lspExtension(pi: ExtensionAPI) {
           const langConfig = config.languages[detectedLang];
           const confirm = await ctx.ui.confirm(
             "LSP Initialization",
-            `Heuristics detected: ${detectedLang}.\nDo you want to initialize LSP for this language using command: '${langConfig.command}'?`,
+            `Language detected: ${detectedLang}.\nDo you want to initialize LSP for this language using command: '${langConfig.command}'?`,
           );
 
           if (!confirm) {
@@ -439,4 +342,234 @@ export default function lspExtension(pi: ExtensionAPI) {
 
   // Register LLM-exposed tools
   registerLspTools(pi, () => lspManager);
+}
+
+export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClientManager | null) {
+  // Tool: lsp_get_symbol_info - query hover definition and code snippets for a symbol
+  pi.registerTool({
+    name: "lsp_get_symbol_info",
+    label: "LSP: Get Symbol Info",
+    description:
+      "Retrieves type signatures, documentation, definition locations, and source code of the definition/declaration for a symbol.",
+    parameters: Type.Object({
+      filePath: Type.String({
+        description: "Path to the file containing the symbol reference.",
+      }),
+      symbolName: Type.String({
+        description: "The name of the symbol to query.",
+      }),
+      line: Type.Optional(
+        Type.Integer({
+          description: "1-indexed line number of the symbol.",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const lspManager = getLspManager();
+      if (!lspManager?.isServerRunning()) {
+        return {
+          content: [{ type: "text", text: "Error: Language server is not running." }],
+          isError: true,
+          details: {},
+        };
+      }
+
+      const res = await getSymbolInfo(
+        lspManager,
+        ctx.cwd,
+        params.filePath,
+        params.symbolName,
+        params.line,
+      );
+      return {
+        content: [{ type: "text", text: res.text }],
+        isError: res.isError,
+        details: res.details ?? {},
+      };
+    },
+  });
+
+  // Tool: lsp_find_references - search for all references to a symbol across files
+  pi.registerTool({
+    name: "lsp_find_references",
+    label: "LSP: Find References",
+    description: "Finds all references and usages of a symbol across the workspace.",
+    parameters: Type.Object({
+      filePath: Type.String({
+        description: "Path to the file containing the symbol reference.",
+      }),
+      symbolName: Type.String({
+        description: "The name of the symbol.",
+      }),
+      line: Type.Optional(
+        Type.Integer({
+          description: "1-indexed line number of the symbol.",
+        }),
+      ),
+      offset: Type.Optional(
+        Type.Integer({
+          description: "1-based starting index (default is 1).",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const lspManager = getLspManager();
+      if (!lspManager?.isServerRunning()) {
+        return {
+          content: [{ type: "text", text: "Error: Language server is not running." }],
+          isError: true,
+          details: {},
+        };
+      }
+
+      const res = await findReferences(
+        lspManager,
+        ctx.cwd,
+        params.filePath,
+        params.symbolName,
+        params.line,
+        params.offset,
+      );
+      return {
+        content: [{ type: "text", text: res.text }],
+        isError: res.isError,
+        details: res.details ?? {},
+      };
+    },
+  });
+
+  // Tool: lsp_search_symbols - find files containing symbol definitions or list outline
+  pi.registerTool({
+    name: "lsp_search_symbols",
+    label: "LSP: Search / List Symbols",
+    description:
+      "Lists symbols defined in a specific file, or searches the entire workspace for symbols matching a query (provide either filePath, query, or both).",
+    parameters: Type.Object({
+      filePath: Type.Optional(
+        Type.String({
+          description: "Path to a file to outline or search within.",
+        }),
+      ),
+      query: Type.Optional(
+        Type.String({
+          description:
+            "Query to search for symbols by name or kind (supported kinds: class, interface, function, method, variable, const, constant, type, enum, struct).",
+        }),
+      ),
+      offset: Type.Optional(
+        Type.Integer({
+          description: "1-based starting index (default is 1).",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const lspManager = getLspManager();
+      if (!lspManager?.isServerRunning()) {
+        return {
+          content: [{ type: "text", text: "Error: Language server is not running." }],
+          isError: true,
+          details: {},
+        };
+      }
+
+      const res = await searchSymbols(
+        lspManager,
+        ctx.cwd,
+        params.filePath,
+        params.query,
+        params.offset,
+      );
+      return {
+        content: [{ type: "text", text: res.text }],
+        isError: res.isError,
+        details: res.details ?? {},
+      };
+    },
+  });
+
+  // Tool: lsp_get_diagnostics - query compiler / linter messages in workspace or for a specific file
+  pi.registerTool({
+    name: "lsp_get_diagnostics",
+    label: "LSP: Get Diagnostics",
+    description:
+      "Retrieves active linter and compiler diagnostics (errors, warnings) for the workspace or a specific file.",
+    parameters: Type.Object({
+      filePath: Type.Optional(
+        Type.String({
+          description:
+            "Path to a file to get diagnostics for. If omitted, returns all workspace diagnostics.",
+        }),
+      ),
+      offset: Type.Optional(
+        Type.Integer({
+          description: "1-based starting index (default is 1).",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const lspManager = getLspManager();
+      if (!lspManager?.isServerRunning()) {
+        return {
+          content: [{ type: "text", text: "Error: Language server is not running." }],
+          isError: true,
+          details: {},
+        };
+      }
+
+      const res = await getDiagnostics(lspManager, ctx.cwd, params.filePath, params.offset);
+      return {
+        content: [{ type: "text", text: res.text }],
+        isError: res.isError,
+        details: res.details ?? {},
+      };
+    },
+  });
+
+  // Tool: lsp_rename_symbol - rename a symbol and apply workspace edit automatically
+  pi.registerTool({
+    name: "lsp_rename_symbol",
+    label: "LSP: Rename Symbol",
+    description:
+      "Renames a symbol globally across all files in the workspace. To uniquely identify the target symbol and avoid renaming an unrelated symbol with the same name in another scope, you must locate its declaration line and provide it.",
+    parameters: Type.Object({
+      filePath: Type.String({
+        description: "Path to the file containing the symbol reference.",
+      }),
+      symbolName: Type.String({
+        description: "The name of the symbol to rename.",
+      }),
+      newName: Type.String({
+        description: "The new name for the symbol.",
+      }),
+      line: Type.Optional(
+        Type.Integer({
+          description: "1-indexed line number where the target symbol is declared.",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const lspManager = getLspManager();
+      if (!lspManager?.isServerRunning()) {
+        return {
+          content: [{ type: "text", text: "Error: Language server is not running." }],
+          isError: true,
+          details: {},
+        };
+      }
+
+      const res = await renameSymbol(
+        lspManager,
+        ctx.cwd,
+        params.filePath,
+        params.symbolName,
+        params.newName,
+        params.line,
+      );
+      return {
+        content: [{ type: "text", text: res.text }],
+        isError: res.isError,
+        details: res.details ?? {},
+      };
+    },
+  });
 }

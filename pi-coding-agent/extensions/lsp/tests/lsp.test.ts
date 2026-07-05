@@ -6,7 +6,13 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { LspClientManager } from "../src/manager.js";
-import { registerLspTools } from "../src/tools.js";
+import {
+  findReferences,
+  getDiagnostics,
+  getSymbolInfo,
+  renameSymbol,
+  searchSymbols,
+} from "../src/tools.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,8 +24,6 @@ const config = JSON.parse(configData);
 interface TestWorkspace {
   tempDir: string;
   manager: LspClientManager;
-  // biome-ignore lint/suspicious/noExplicitAny: Mocking tools Map
-  tools: Map<string, any>;
 }
 
 async function pollUntilReady(
@@ -43,7 +47,7 @@ async function pollUntilReady(
 }
 
 async function setupWorkspace(
-  lang: "go" | "ts",
+  lang: "go" | "ts" | "cpp",
   files: Record<string, string>,
   serverCmd: string,
   serverArgs: string[],
@@ -56,17 +60,6 @@ async function setupWorkspace(
   }
 
   const manager = new LspClientManager(tempDir, config);
-  // biome-ignore lint/suspicious/noExplicitAny: Mocking tools Map
-  const tools = new Map<string, any>();
-  const mockPi = {
-    // biome-ignore lint/suspicious/noExplicitAny: Mocking tool parameter
-    registerTool(tool: any) {
-      tools.set(tool.name, tool);
-    },
-  };
-  // biome-ignore lint/suspicious/noExplicitAny: Mocking ExtensionAPI
-  registerLspTools(mockPi as any, () => manager);
-
   await manager.start(serverCmd, serverArgs);
 
   for (const name of Object.keys(files)) {
@@ -75,7 +68,7 @@ async function setupWorkspace(
 
   await pollUntilReady(manager, mainFile);
 
-  return { tempDir, manager, tools };
+  return { tempDir, manager };
 }
 
 async function teardownWorkspace(workspace: TestWorkspace) {
@@ -121,59 +114,32 @@ func main() {
   });
 
   test("lsp_get_symbol_info", async () => {
-    const tool = ws.tools.get("lsp_get_symbol_info");
-    const result = await tool.execute(
-      "call-1",
-      { filePath: "main.go", symbolName: "Add", line: 6 },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const result = await getSymbolInfo(ws.manager, ws.tempDir, "main.go", "Add", 6);
 
     assert.equal(result.isError, undefined);
-    assert.ok(result.content[0].text.includes("func Add(a int, b int) int"));
-    assert.ok(result.content[0].text.includes("main.go:6"));
+    assert.ok(result.text.includes("func Add(a int, b int) int"));
+    assert.ok(result.text.includes("main.go:6"));
   });
 
   test("lsp_find_references", async () => {
-    const tool = ws.tools.get("lsp_find_references");
-    const result = await tool.execute(
-      "call-2",
-      { filePath: "main.go", symbolName: "Add", line: 6 },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const result = await findReferences(ws.manager, ws.tempDir, "main.go", "Add", 6);
 
     assert.equal(result.isError, undefined);
-    assert.ok(result.content[0].text.includes("main.go:6"));
-    assert.ok(result.content[0].text.includes("main.go:11"));
+    assert.ok(result.text.includes("main.go:6"));
+    assert.ok(result.text.includes("main.go:11"));
   });
 
   test("lsp_search_symbols", async () => {
-    const tool = ws.tools.get("lsp_search_symbols");
     // Search in main.go
-    const resultFile = await tool.execute(
-      "call-3a",
-      { filePath: "main.go" },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const resultFile = await searchSymbols(ws.manager, ws.tempDir, "main.go");
     assert.equal(resultFile.isError, undefined);
-    assert.ok(resultFile.content[0].text.includes("Function: Add"));
-    assert.ok(resultFile.content[0].text.includes("Function: main"));
+    assert.ok(resultFile.text.includes("Function: Add"));
+    assert.ok(resultFile.text.includes("Function: main"));
 
     // Search workspace
-    const resultQuery = await tool.execute(
-      "call-3b",
-      { query: "Add" },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const resultQuery = await searchSymbols(ws.manager, ws.tempDir, undefined, "Add");
     assert.equal(resultQuery.isError, undefined);
-    assert.ok(resultQuery.content[0].text.includes("Add"));
+    assert.ok(resultQuery.text.includes("Add"));
   });
 
   test("lsp_get_diagnostics", async () => {
@@ -197,21 +163,14 @@ func main() {
     await ws.manager.syncFile("main.go");
     await diagPromise;
 
-    // Call lsp_get_diagnostics
-    const tool = ws.tools.get("lsp_get_diagnostics");
-    const result = await tool.execute(
-      "call-4",
-      { filePath: "main.go" },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    // Call getDiagnostics
+    const result = await getDiagnostics(ws.manager, ws.tempDir, "main.go");
 
     assert.equal(result.isError, undefined);
     assert.ok(
-      result.content[0].text.includes("not enough arguments") ||
-        result.content[0].text.includes("too few arguments") ||
-        result.content[0].text.includes("multiple-value"),
+      result.text.includes("not enough arguments") ||
+        result.text.includes("too few arguments") ||
+        result.text.includes("multiple-value"),
     );
 
     // Restore clean file on disk
@@ -247,32 +206,14 @@ func main() {
     await fs.writeFile(path.join(tempDir, "main.go"), badGo, "utf8");
 
     const manager = new LspClientManager(tempDir, config);
-    // biome-ignore lint/suspicious/noExplicitAny: Mocking tools Map
-    const tools = new Map<string, any>();
-    const mockPi = {
-      // biome-ignore lint/suspicious/noExplicitAny: Mocking tool parameter
-      registerTool(tool: any) {
-        tools.set(tool.name, tool);
-      },
-    };
-    // biome-ignore lint/suspicious/noExplicitAny: Mocking ExtensionAPI
-    registerLspTools(mockPi as any, () => manager);
-
     await manager.start("gopls", []);
 
-    // Call lsp_get_diagnostics workspace-wide without syncing files first
-    const tool = tools.get("lsp_get_diagnostics");
-    const result = await tool.execute(
-      "call-startup-diag",
-      {}, // no filePath
-      new AbortController().signal,
-      () => {},
-      { cwd: tempDir },
-    );
+    // Call getDiagnostics workspace-wide without syncing files first
+    const result = await getDiagnostics(manager, tempDir);
 
     assert.equal(result.isError, undefined);
     assert.ok(
-      result.content[0].text.includes("main.go"),
+      result.text.includes("main.go"),
       "Output should report startup error in main.go without manual syncFile",
     );
 
@@ -281,18 +222,11 @@ func main() {
   });
 
   test("lsp_rename_symbol", async () => {
-    const tool = ws.tools.get("lsp_rename_symbol");
-    const result = await tool.execute(
-      "call-5",
-      { filePath: "main.go", symbolName: "Add", newName: "Sum", line: 6 },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const result = await renameSymbol(ws.manager, ws.tempDir, "main.go", "Add", "Sum", 6);
 
     assert.equal(result.isError, undefined);
-    assert.ok(result.content[0].text.includes("Renamed"));
-    assert.ok(result.content[0].text.includes("Sum"));
+    assert.ok(result.text.includes("Renamed"));
+    assert.ok(result.text.includes("Sum"));
 
     // Verify file content was updated on disk
     const content = await fs.readFile(path.join(ws.tempDir, "main.go"), "utf8");
@@ -341,59 +275,32 @@ export { res };
   });
 
   test("lsp_get_symbol_info", async () => {
-    const tool = ws.tools.get("lsp_get_symbol_info");
-    const result = await tool.execute(
-      "call-ts-1",
-      { filePath: "main.ts", symbolName: "multiply", line: 3 },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const result = await getSymbolInfo(ws.manager, ws.tempDir, "main.ts", "multiply", 3);
 
     assert.equal(result.isError, undefined);
-    assert.ok(result.content[0].text.includes("multiply"));
-    assert.ok(result.content[0].text.includes("math.ts:1"));
+    assert.ok(result.text.includes("multiply"));
+    assert.ok(result.text.includes("math.ts:1"));
   });
 
   test("lsp_find_references", async () => {
-    const tool = ws.tools.get("lsp_find_references");
-    const result = await tool.execute(
-      "call-ts-2",
-      { filePath: "math.ts", symbolName: "multiply", line: 1 },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const result = await findReferences(ws.manager, ws.tempDir, "math.ts", "multiply", 1);
 
     assert.equal(result.isError, undefined);
-    assert.ok(result.content[0].text.includes("math.ts:1"));
-    assert.ok(result.content[0].text.includes("main.ts:1"));
-    assert.ok(result.content[0].text.includes("main.ts:3"));
+    assert.ok(result.text.includes("math.ts:1"));
+    assert.ok(result.text.includes("main.ts:1"));
+    assert.ok(result.text.includes("main.ts:3"));
   });
 
   test("lsp_search_symbols", async () => {
-    const tool = ws.tools.get("lsp_search_symbols");
     // Search in math.ts
-    const resultFile = await tool.execute(
-      "call-ts-3a",
-      { filePath: "math.ts" },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const resultFile = await searchSymbols(ws.manager, ws.tempDir, "math.ts");
     assert.equal(resultFile.isError, undefined);
-    assert.ok(resultFile.content[0].text.includes("Function: multiply"));
+    assert.ok(resultFile.text.includes("Function: multiply"));
 
     // Search workspace
-    const resultQuery = await tool.execute(
-      "call-ts-3b",
-      { query: "multiply" },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const resultQuery = await searchSymbols(ws.manager, ws.tempDir, undefined, "multiply");
     assert.equal(resultQuery.isError, undefined);
-    assert.ok(resultQuery.content[0].text.includes("multiply"));
+    assert.ok(resultQuery.text.includes("multiply"));
   });
 
   test("lsp_get_diagnostics", async () => {
@@ -408,21 +315,11 @@ export { res };
     await ws.manager.syncFile("main.ts");
     await diagPromise;
 
-    // Call lsp_get_diagnostics
-    const tool = ws.tools.get("lsp_get_diagnostics");
-    const result = await tool.execute(
-      "call-ts-4",
-      { filePath: "main.ts" },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    // Call getDiagnostics
+    const result = await getDiagnostics(ws.manager, ws.tempDir, "main.ts");
 
     assert.equal(result.isError, undefined);
-    assert.ok(
-      result.content[0].text.includes("Argument of type") ||
-        result.content[0].text.includes("not assignable"),
-    );
+    assert.ok(result.text.includes("Argument of type") || result.text.includes("not assignable"));
 
     // Restore clean file on disk
     const cleanTs = `import { multiply } from "./math";
@@ -462,32 +359,14 @@ export { res };
     await fs.writeFile(path.join(tempDir, "main.ts"), badTs, "utf8");
 
     const manager = new LspClientManager(tempDir, config);
-    // biome-ignore lint/suspicious/noExplicitAny: Mocking tools Map
-    const tools = new Map<string, any>();
-    const mockPi = {
-      // biome-ignore lint/suspicious/noExplicitAny: Mocking tool parameter
-      registerTool(tool: any) {
-        tools.set(tool.name, tool);
-      },
-    };
-    // biome-ignore lint/suspicious/noExplicitAny: Mocking ExtensionAPI
-    registerLspTools(mockPi as any, () => manager);
-
     await manager.start("typescript-language-server", ["--stdio"]);
 
-    // Call lsp_get_diagnostics workspace-wide without syncing files first
-    const tool = tools.get("lsp_get_diagnostics");
-    const result = await tool.execute(
-      "call-startup-diag",
-      {}, // no filePath
-      new AbortController().signal,
-      () => {},
-      { cwd: tempDir },
-    );
+    // Call getDiagnostics workspace-wide without syncing files first
+    const result = await getDiagnostics(manager, tempDir);
 
     assert.equal(result.isError, undefined);
     assert.ok(
-      result.content[0].text.includes("main.ts"),
+      result.text.includes("main.ts"),
       "Output should report startup error in main.ts without manual syncFile",
     );
 
@@ -506,22 +385,156 @@ export { res };
     await ws.manager.syncFile("main.ts");
     await pollUntilReady(ws.manager, "main.ts");
 
-    const tool = ws.tools.get("lsp_rename_symbol");
-    const result = await tool.execute(
-      "call-ts-5",
-      { filePath: "main.ts", symbolName: "res", newName: "result", line: 2 },
-      new AbortController().signal,
-      () => {},
-      { cwd: ws.tempDir },
-    );
+    const result = await renameSymbol(ws.manager, ws.tempDir, "main.ts", "res", "result", 2);
 
     assert.equal(result.isError, undefined);
-    assert.ok(result.content[0].text.includes("Renamed"));
-    assert.ok(result.content[0].text.includes("result"));
+    assert.ok(result.text.includes("Renamed"));
+    assert.ok(result.text.includes("result"));
 
     // Verify main.ts was updated
     const mainContent = await fs.readFile(path.join(ws.tempDir, "main.ts"), "utf8");
     assert.ok(mainContent.includes("const result ="));
+    assert.ok(mainContent.includes("return result + 5;"));
+    assert.ok(!/\bres\b/.test(mainContent));
+  });
+});
+
+describe("LSP Tools for C/C++", { timeout: 30000 }, () => {
+  let ws: TestWorkspace;
+
+  before(async () => {
+    ws = await setupWorkspace(
+      "cpp",
+      {
+        "compile_flags.txt": "-std=c++17\n-I.\n",
+        "math.h": `int multiply(int a, int b);
+`,
+        "math.cpp": `#include "math.h"
+int multiply(int a, int b) {
+  return a * b;
+}
+`,
+        "main.cpp": `#include "math.h"
+#include <iostream>
+
+int main() {
+  int res = multiply(2, 5);
+  std::cout << res << std::endl;
+  return 0;
+}
+`,
+      },
+      "clangd",
+      [],
+      "main.cpp",
+    );
+  });
+
+  after(async () => {
+    await teardownWorkspace(ws);
+  });
+
+  test("lsp_get_symbol_info", async () => {
+    const result = await getSymbolInfo(ws.manager, ws.tempDir, "main.cpp", "multiply", 5);
+
+    assert.equal(result.isError, undefined);
+    const text = result.text;
+    assert.ok(text.includes("multiply"));
+    assert.ok(
+      text.includes("math.cpp:2") || text.includes("math.h:1"),
+      `Expected symbol info to point to math.cpp:2 or math.h:1, but got:\n${text}`,
+    );
+  });
+
+  test("lsp_find_references", async () => {
+    const result = await findReferences(ws.manager, ws.tempDir, "math.h", "multiply", 1);
+
+    assert.equal(result.isError, undefined);
+    assert.ok(result.text.includes("math.h:1"));
+    assert.ok(result.text.includes("math.cpp:2"));
+    assert.ok(result.text.includes("main.cpp:5"));
+  });
+
+  test("lsp_search_symbols", async () => {
+    // Search in math.cpp
+    const resultFile = await searchSymbols(ws.manager, ws.tempDir, "math.cpp");
+    assert.equal(resultFile.isError, undefined);
+    assert.ok(resultFile.text.includes("multiply") || resultFile.text.includes("Function"));
+
+    // Search workspace
+    const resultQuery = await searchSymbols(ws.manager, ws.tempDir, undefined, "multiply");
+    assert.equal(resultQuery.isError, undefined);
+    assert.ok(resultQuery.text.includes("multiply"));
+  });
+
+  test("lsp_get_diagnostics", async () => {
+    // Write invalid content to main.cpp on disk
+    const badCpp = `#include "math.h"
+#include <iostream>
+
+int main() {
+  int res = multiply(2, "hello");
+  std::cout << res << std::endl;
+  return 0;
+}
+`;
+    const diagPromise = ws.manager.waitForDiagnostics("main.cpp", 5000);
+    await fs.writeFile(path.join(ws.tempDir, "main.cpp"), badCpp, "utf8");
+    await ws.manager.syncFile("main.cpp");
+    await diagPromise;
+
+    // Call getDiagnostics
+    const result = await getDiagnostics(ws.manager, ws.tempDir, "main.cpp");
+
+    assert.equal(result.isError, undefined);
+    const text = result.text.toLowerCase();
+    assert.ok(
+      text.includes("conversion") ||
+        text.includes("cannot initialize") ||
+        text.includes("no matching function") ||
+        text.includes("invalid") ||
+        text.includes("type") ||
+        text.includes("parameter") ||
+        text.includes("viable"),
+      `Expected diagnostic error about type mismatch/invalid argument, but got:\n${result.text}`,
+    );
+
+    // Restore clean file on disk
+    const cleanCpp = `#include "math.h"
+#include <iostream>
+
+int main() {
+  int res = multiply(2, 5);
+  std::cout << res << std::endl;
+  return 0;
+}
+`;
+    const restorePromise = ws.manager.waitForDiagnostics("main.cpp", 5000);
+    await fs.writeFile(path.join(ws.tempDir, "main.cpp"), cleanCpp, "utf8");
+    await ws.manager.syncFile("main.cpp");
+    await restorePromise;
+  });
+
+  test("lsp_rename_symbol", async () => {
+    // Write clean self-contained content to main.cpp
+    const simpleCpp = `int calculate() {
+  int res = 10;
+  return res + 5;
+}
+`;
+    await fs.writeFile(path.join(ws.tempDir, "main.cpp"), simpleCpp, "utf8");
+    await ws.manager.syncFile("main.cpp");
+    await pollUntilReady(ws.manager, "main.cpp");
+
+    const result = await renameSymbol(ws.manager, ws.tempDir, "main.cpp", "res", "result", 2);
+
+    assert.equal(result.isError, undefined);
+    assert.ok(result.text.includes("Renamed"));
+    assert.ok(result.text.includes("result"));
+
+    // Verify main.cpp was updated
+    const mainContent = await fs.readFile(path.join(ws.tempDir, "main.cpp"), "utf8");
+    assert.ok(mainContent.includes("int result ="));
     assert.ok(mainContent.includes("return result + 5;"));
     assert.ok(!/\bres\b/.test(mainContent));
   });

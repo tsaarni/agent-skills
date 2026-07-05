@@ -6,55 +6,63 @@
     "typescript": {
       "command": "typescript-language-server",
       "args": ["--stdio"],
-      "fileExtensions": [".ts", ".tsx", ".cts", ".mts"],
-      "heuristics": {
-        "files": ["tsconfig.json", "package.json"]
+      "detection": {
+        "files": ["tsconfig.json", "package.json"],
+        "extensions": [".ts", ".tsx", ".cts", ".mts"]
       }
     },
     "javascript": {
       "command": "typescript-language-server",
       "args": ["--stdio"],
-      "fileExtensions": [".js", ".jsx", ".cjs", ".mjs"],
-      "heuristics": {
-        "files": ["jsconfig.json", "package.json"]
+      "detection": {
+        "files": ["jsconfig.json", "package.json"],
+        "extensions": [".js", ".jsx", ".cjs", ".mjs"]
       }
     },
     "python": {
       "command": "pyright-langserver",
       "args": ["--stdio"],
-      "fileExtensions": [".py"],
-      "heuristics": {
-        "files": ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile"]
+      "detection": {
+        "files": ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile"],
+        "extensions": [".py"]
       }
     },
     "go": {
       "command": "gopls",
       "args": [],
-      "fileExtensions": [".go"],
-      "heuristics": {
-        "files": ["go.mod", "go.work"]
+      "detection": {
+        "files": ["go.mod", "go.work"],
+        "extensions": [".go"]
       }
     },
     "rust": {
       "command": "rust-analyzer",
       "args": [],
-      "fileExtensions": [".rs"],
-      "heuristics": {
-        "files": ["Cargo.toml"]
+      "detection": {
+        "files": ["Cargo.toml"],
+        "extensions": [".rs"]
       }
     },
     "java": {
       "command": "jdtls",
       "args": [],
-      "fileExtensions": [".java"],
-      "heuristics": {
+      "detection": {
         "files": [
           "pom.xml",
           "build.gradle",
           "build.gradle.kts",
           "settings.gradle",
           "settings.gradle.kts"
-        ]
+        ],
+        "extensions": [".java"]
+      }
+    },
+    "cpp": {
+      "command": "clangd",
+      "args": [],
+      "detection": {
+        "files": ["compile_commands.json", "compile_flags.txt", "CMakeLists.txt"],
+        "extensions": [".cpp", ".c", ".h", ".hpp", ".cc", ".cxx", ".hxx"]
       }
     }
   }

@@ -1,4 +1,4 @@
-# LSP Server Extension for Pi Coding Agent
+# LSP Extension for Pi Coding Agent
 
 An LSP extension for the [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent).
 Connects to local language servers and provides code intelligence (navigation, diagnostics, refactoring) to the agent.
@@ -14,14 +14,15 @@ Connects to local language servers and provides code intelligence (navigation, d
 
 Language server binaries must be in system `PATH`.
 
-| Language | Language Server Binary | Config Files | File Extensions |
-|---|---|---|---|
-| TypeScript | `typescript-language-server` | `tsconfig.json`, `package.json` | `.ts`, `.tsx`, `.cts`, `.mts` |
-| JavaScript | `typescript-language-server` | `jsconfig.json`, `package.json` | `.js`, `.jsx`, `.cjs`, `.mjs` |
-| Python | `pyright-langserver` | `requirements.txt`, `pyproject.toml`, `setup.py`, `Pipfile` | `.py` |
-| Go | `gopls` | `go.mod`, `go.work` | `.go` |
-| Rust | `rust-analyzer` | `Cargo.toml` | `.rs` |
-| Java | `jdtls` | `pom.xml`, `build.gradle`, `build.gradle.kts`, `settings.gradle`, `settings.gradle.kts` | `.java` |
+| Language | Language Server Binary |
+|---|---|
+| TypeScript | `typescript-language-server` |
+| JavaScript | `typescript-language-server` |
+| Python | `pyright-langserver` |
+| Go | `gopls` |
+| Rust | `rust-analyzer` |
+| Java | `jdtls` |
+| C/C++ | `clangd` |
 
 Language server commands, default limits, and timeouts are configurable in [`lsp-config.json`](lsp-config.json).
 

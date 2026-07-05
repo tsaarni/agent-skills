@@ -41,7 +41,7 @@ export function getLanguageId(filePath: string, config?: ServersConfig | null): 
   const ext = path.extname(filePath).toLowerCase();
   if (config?.languages) {
     for (const [langId, langConfig] of Object.entries(config.languages)) {
-      if (langConfig.fileExtensions.includes(ext)) {
+      if (langConfig.detection.extensions.includes(ext)) {
         return langId;
       }
     }
@@ -1055,7 +1055,7 @@ export class LspClientManager {
     const extensions = new Set<string>();
     if (this.config?.languages) {
       for (const langConfig of Object.values(this.config.languages)) {
-        for (const ext of langConfig.fileExtensions) {
+        for (const ext of langConfig.detection.extensions) {
           extensions.add(ext.toLowerCase());
         }
       }
