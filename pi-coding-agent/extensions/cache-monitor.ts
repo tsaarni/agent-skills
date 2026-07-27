@@ -5,6 +5,15 @@
  * Renders a compact single-line card after each assistant response.
  *
  * Command:  /cache-stats  for cumulative session report
+ *
+ * Drop detection algorithm:
+ *   If the number of cached tokens (cacheRead) drops to less than
+ *   half of the previous turn's cacheRead, it's flagged as a cache
+ *   drop.  In normal operation cacheRead stays stable or grows as
+ *   the conversation accumulates more cached content — it should
+ *   never shrink.  A drop of more than 50% means previously cached
+ *   content is no longer being served (e.g. model switch, provider
+ *   cache eviction, server restart).
  */
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -53,7 +62,6 @@ interface CumulativeStats {
   totalSavings: number;
   cacheDrops: number;
   lastCacheRead: number;
-  turnsSinceLastCacheRead: number;
 }
 
 // Helpers
@@ -92,7 +100,7 @@ export default function (pi: ExtensionAPI) {
     totalSavings: 0,
     cacheDrops: 0,
     lastCacheRead: -1,
-    turnsSinceLastCacheRead: 0,
+
   };
 
   let currentTurnIndex = 0;
@@ -146,7 +154,6 @@ export default function (pi: ExtensionAPI) {
 
     // Approximate drop-tracking state from last entry
     stats.lastCacheRead = lastData.cacheRead;
-    stats.turnsSinceLastCacheRead = lastData.cacheRead === 0 ? 1 : 0;
   }
 
   // ── Inline renderer ──
@@ -216,19 +223,20 @@ export default function (pi: ExtensionAPI) {
   // ── message_end: accumulate usage (defer card render to turn_end) ──
   pi.on("message_end", (event, _ctx) => {
     if (event.message.role !== "assistant") return;
+    if (event.message.stopReason === "aborted") return; // skip aborted turns (no usage data)
 
     const usage = event.message.usage;
-
-    // Drop detection
-    let dropDetected = false;
-    if (stats.lastCacheRead > 0 && usage.cacheRead === 0 && stats.turnsSinceLastCacheRead <= 2) {
-      dropDetected = true;
-      stats.cacheDrops++;
-    }
 
     // Per-turn
     const totalIn = usage.input + usage.cacheRead + usage.cacheWrite;
     const hitRate = totalIn > 0 ? usage.cacheRead / totalIn : 0;
+
+    // Drop detection: cacheRead dropped to less than half of previous turn
+    let dropDetected = false;
+    if (stats.lastCacheRead > 0 && usage.cacheRead < stats.lastCacheRead * 0.5) {
+      dropDetected = true;
+      stats.cacheDrops++;
+    }
 
     // Savings
     const inputPricePerM = ((usage.cost?.input ?? 0) / Math.max(1, usage.input + usage.cacheWrite)) * 1_000_000;
@@ -250,7 +258,6 @@ export default function (pi: ExtensionAPI) {
     stats.totalCacheReadCost += usage.cost?.cacheRead ?? 0;
     stats.totalSavings += Math.max(0, saved);
     stats.lastCacheRead = usage.cacheRead;
-    stats.turnsSinceLastCacheRead = usage.cacheRead === 0 ? stats.turnsSinceLastCacheRead + 1 : 0;
 
     const cumTotalIn = stats.totalInput + stats.totalCacheRead + stats.totalCacheWrite;
     const cumHitRate = cumTotalIn > 0 ? stats.totalCacheRead / cumTotalIn : 0;
