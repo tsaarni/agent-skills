@@ -1,0 +1,24 @@
+{
+  "name": "tool-tuner",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "LLM agent toolkit for evaluating tool descriptions via isolated pi sessions",
+  "scripts": {
+    "tool-tuner": "tsx src/cli.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src/",
+    "format": "biome format --write src/"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "file:/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-ai": "file:/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai",
+    "typebox": "1.1.38"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

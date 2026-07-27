@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tool / Skill Definition",
+  "description": "Defines a tool or skill for evaluation. Tools have parameters (a JSON Schema object). Skills do not.",
+  "oneOf": [
+    {
+      "title": "Tool",
+      "type": "object",
+      "required": ["kind", "name", "description", "parameters"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "tool" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "parameters": {
+          "type": "object",
+          "required": ["type", "properties"],
+          "properties": {
+            "type": { "const": "object" },
+            "required": { "type": "array", "items": { "type": "string" } },
+            "properties": { "type": "object" }
+          }
+        }
+      }
+    },
+    {
+      "title": "Skill",
+      "type": "object",
+      "required": ["kind", "name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "skill" },
+        "name": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    }
+  ]
+}
