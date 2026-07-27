@@ -110,6 +110,7 @@ export default function lspExtension(pi: ExtensionAPI) {
     if (projectConfig?.autostart) {
       try {
         await lspManager.start(projectConfig.command, projectConfig.args);
+        registerLspTools(pi, () => lspManager);
         sendLspStatus(pi, {
           language: projectConfig.language,
           command: projectConfig.command,
@@ -275,6 +276,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 
           ctx.ui.notify(`LSP initialized for ${detectedLang}! Starting server...`, "info");
           await lspManager.start(langConfig.command, langConfig.args);
+          registerLspTools(pi, () => lspManager);
           ctx.ui.notify("LSP started successfully.", "info");
           sendLspStatus(pi, {
             language: detectedLang,
@@ -340,8 +342,6 @@ export default function lspExtension(pi: ExtensionAPI) {
     },
   });
 
-  // Register LLM-exposed tools
-  registerLspTools(pi, () => lspManager);
 }
 
 export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClientManager | null) {
