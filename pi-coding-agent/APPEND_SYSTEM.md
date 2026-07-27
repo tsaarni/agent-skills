@@ -1,2 +1,3 @@
+- ALWAYS ask user before (1) installing or removing anything on users system, (2) doing destructive git operations 
 - ALWAYS use `rg` for searching file contents.
 - Use `read` with offset/limit: only read limited number of lines to save tokens
