@@ -5,17 +5,12 @@
  * Renders a compact single-line card after each assistant response.
  *
  * Command:  /cache-stats  for cumulative session report
- * Log file: .pi/cache-monitor.log
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text, visibleWidth } from "@earendil-works/pi-tui";
 
-// ---------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
 
 interface CacheCardData {
   turnIndex: number;
@@ -61,9 +56,7 @@ interface CumulativeStats {
   turnsSinceLastCacheRead: number;
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -81,13 +74,8 @@ function pct(n: number): string {
   return `${(n * 100).toFixed(0)}%`;
 }
 
-function ts(): string {
-  return new Date().toISOString().replace("T", " ").slice(0, 19);
-}
 
-// ---------------------------------------------------------------------------
 // Extension
-// ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
   const stats: CumulativeStats = {
@@ -114,12 +102,6 @@ export default function (pi: ExtensionAPI) {
   let pendingCardData: CacheCardData | undefined;
   let lastTurnData: CacheCardData | undefined;
 
-  function log(ctx: { cwd: string }, line: string) {
-    const dir = join(ctx.cwd, CONFIG_DIR_NAME);
-    mkdirSync(dir, { recursive: true });
-    const logFile = join(dir, "cache-monitor.log");
-    appendFileSync(logFile, `[${ts()}] ${line}\n`, "utf8");
-  }
 
   /** Rebuild cumulative stats from persisted session entries after reload */
   function restoreFromSession(ctx: { sessionManager: { getEntries: () => Array<{ type: string; customType?: string; data?: CacheCardData }> } }): void {
@@ -195,8 +177,8 @@ export default function (pi: ExtensionAPI) {
 
     // Right: cost impact
     const right = [
-      dim(`cost:${fmtCost(d.costTotal)}`),
-      d.turnSaved > 0 ? good(`saved:${fmtCost(d.turnSaved)}`) : "",
+      dim(`cost:${fmtCost(d.cumCost)}`),
+      d.cumSaved > 0 ? good(`saved:${fmtCost(d.cumSaved)}`) : "",
     ].filter(Boolean).join("  ");
 
     const alerts: string[] = [];
@@ -226,30 +208,16 @@ export default function (pi: ExtensionAPI) {
     pendingMarkerCount = count;
   });
 
-  // ── after_provider_response: capture status + log cache headers ──
-  pi.on("after_provider_response", (event, ctx) => {
+  // ── after_provider_response: capture status ──
+  pi.on("after_provider_response", (event, _ctx) => {
     pendingResponseStatus = event.status;
-    const cacheHeaders: string[] = [];
-    for (const [key, value] of Object.entries(event.headers)) {
-      const lower = key.toLowerCase();
-      if (lower.includes("cache") || lower.includes("x-ratelimit") || lower.includes("x-request-id") || lower === "retry-after") {
-        cacheHeaders.push(`  ${key}: ${value}`);
-      }
-    }
-    if (cacheHeaders.length > 0) {
-      log(ctx, `Response headers (${event.status}):\n${cacheHeaders.join("\n")}`);
-    }
   });
 
   // ── message_end: accumulate usage (defer card render to turn_end) ──
-  pi.on("message_end", (event, ctx) => {
+  pi.on("message_end", (event, _ctx) => {
     if (event.message.role !== "assistant") return;
 
     const usage = event.message.usage;
-    const model = event.message.model;
-
-    // Log raw usage for debugging (check what the provider actually returns)
-    log(ctx, `RAW usage: ${JSON.stringify(usage)}`);
 
     // Drop detection
     let dropDetected = false;
@@ -322,17 +290,6 @@ export default function (pi: ExtensionAPI) {
       responseStatus: pendingResponseStatus,
     };
 
-    // Log
-    const w1h = usage.cacheWrite1h ? ` (1h:${fmt(usage.cacheWrite1h)})` : "";
-    log(
-      ctx,
-      [
-        `T${pendingCardData.turnIndex} ${model}`,
-        `  in: ↑${fmt(usage.input)} R${fmt(usage.cacheRead)} W${fmt(usage.cacheWrite)}${w1h}  out: ↓${fmt(usage.output)}  hit:${pct(hitRate)}  ${fmtCost(pendingCardData.costTotal)}`,
-        `  cum: ${stats.turns}t  R${fmt(stats.totalCacheRead)} W${fmt(stats.totalCacheWrite)}  hit:${pct(cumHitRate)}  ${fmtCost(stats.totalCost)}  saved:${fmtCost(stats.totalSavings)}  drops:${stats.cacheDrops}${dropDetected ? " DROP" : ""}`,
-      ].join("\n"),
-    );
-
     pendingMarkerCount = undefined;
     pendingResponseStatus = undefined;
   });
@@ -371,7 +328,6 @@ export default function (pi: ExtensionAPI) {
         cacheDrops: stats.cacheDrops,
         timestamp: Date.now(),
       });
-      log(ctx, `REPORT — ${stats.turns} turns, hit:${pct(hitRate)}, ${fmtCost(stats.totalCost)}, drops:${stats.cacheDrops}`);
     },
   });
 
