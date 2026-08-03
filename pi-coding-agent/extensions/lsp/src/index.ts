@@ -443,7 +443,7 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
     name: "lsp_search_symbols",
     label: "LSP: Search / List Symbols",
     description:
-      "Lists symbols defined in a specific file, or searches the entire workspace for symbols matching a query (provide either filePath, query, or both).",
+      "Call this tool when asked to find or list symbol declarations of a specific kind in a file or across the workspace. Provide filePath or a query to search the workspace by name or kind.",
     parameters: Type.Object({
       filePath: Type.Optional(
         Type.String({

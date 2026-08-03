@@ -228,6 +228,8 @@ to confirm everything still passes.
 
 ## Tips
 
+- **No need for real tools.** This is simulated test, there is no need actually set up e.g.
+  MCP server to run the simulation of the tool calls.
 - **Be specific about boundaries.** A good description says what the tool/skill does
   AND what it does not do.
 - **Use example triggers.** Phrases like "for real-time lookups such as news or

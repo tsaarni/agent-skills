@@ -9,7 +9,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  CONFIG_DIR_NAME,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -34,14 +37,34 @@ export interface McpConfig {
   mcpServers?: Record<string, McpServerConfig>;
 }
 
-const CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "mcp.json");
+const GLOBAL_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "mcp.json");
 
-async function loadConfig(): Promise<McpConfig | null> {
+/**
+ * Projects with project-local MCP config enabled for the current process.
+ *
+ * Declared at module scope so it survives session replacements (/new, /fork,
+ * and /resume back into the same project): pi caches the extension module
+ * between sessions and only re-evaluates it on /reload or when the working
+ * directory changes. It is intentionally in-memory — nothing is persisted to
+ * disk, so it resets when the pi agent restarts.
+ */
+const enabledProjects = new Set<string>();
+
+async function loadConfig(configPath: string): Promise<McpConfig | null> {
   try {
-    const raw = await fs.readFile(CONFIG_PATH, "utf8");
+    const raw = await fs.readFile(configPath, "utf8");
     return JSON.parse(raw) as McpConfig;
   } catch {
     return null;
+  }
+}
+
+/** Resolves symlinks so enabled-project lookups match regardless of symlinked cwd. */
+async function canonicalizePath(p: string): Promise<string> {
+  try {
+    return await fs.realpath(p);
+  } catch {
+    return path.resolve(p);
   }
 }
 
@@ -308,28 +331,101 @@ async function registerTools(
 }
 
 /**
- * Reads `mcp.json`, connects to all servers, registers tools.
- * Connections are closed on session shutdown.
+ * Loads MCP servers from the global `~/.pi/agent/mcp.json` at startup and,
+ * when explicitly enabled for the session via `/mcp-enable-project`, from
+ * `.pi/mcp.json` relative to the project directory.
+ *
+ * Project-local config is off by default. When pi starts in a project that
+ * ships a `.pi/mcp.json` that isn't enabled, a notice suggests the command.
+ * All connections are closed on `session_shutdown` so they get re-established
+ * after `/reload`, `/resume`, or `/new`.
  */
 export default async function mcpExtension(pi: ExtensionAPI): Promise<void> {
-  const config = await loadConfig();
-  if (!config?.mcpServers) {
-    return;
-  }
-
   const connections: ServerConnection[] = [];
 
-  for (const [name, server] of Object.entries(config.mcpServers)) {
-    try {
-      const conn = await connectServer(pi, name, server);
-      if (conn) {
-        connections.push(conn);
+  // 1. Global config – loaded eagerly at startup
+  const globalConfig = await loadConfig(GLOBAL_CONFIG_PATH);
+  if (globalConfig?.mcpServers) {
+    for (const [name, server] of Object.entries(globalConfig.mcpServers)) {
+      try {
+        const conn = await connectServer(pi, name, server);
+        if (conn) connections.push(conn);
+      } catch (error: unknown) {
+        console.error(
+          `MCP: Failed to connect to global server "${name}":`,
+          error,
+        );
       }
-    } catch (error: unknown) {
-      console.error(`MCP: Failed to connect to server "${name}":`, error);
     }
   }
 
+  // 2. Project-local config – loaded only when explicitly enabled via
+  //    /mcp-enable-project (off by default for security). The enabled set
+  //    lives at module scope, so it survives /new, /fork, and /resume into
+  //    the same project; it resets on /reload or restart.
+
+  const loadProjectServers = async (cwd: string): Promise<void> => {
+    const projectConfigPath = path.join(cwd, CONFIG_DIR_NAME, "mcp.json");
+    const projectConfig = await loadConfig(projectConfigPath);
+    if (!projectConfig?.mcpServers) return;
+
+    for (const [name, server] of Object.entries(projectConfig.mcpServers)) {
+      // Skip if a global server with the same name already exists
+      if (connections.some((c) => c.name === name)) {
+        console.error(
+          `MCP: Project server "${name}" conflicts with an existing server, skipping`,
+        );
+        continue;
+      }
+      try {
+        const conn = await connectServer(pi, name, server);
+        if (conn) connections.push(conn);
+      } catch (error: unknown) {
+        console.error(
+          `MCP: Failed to connect to project server "${name}":`,
+          error,
+        );
+      }
+    }
+  };
+
+  pi.on("session_start", async (_event, ctx) => {
+    const cwd = await canonicalizePath(ctx.cwd);
+    if (enabledProjects.has(cwd)) {
+      await loadProjectServers(ctx.cwd);
+      return;
+    }
+
+    // Not enabled for this project yet: hint when the project ships its own
+    // MCP config that would otherwise be ignored
+    const projectConfig = await loadConfig(
+      path.join(ctx.cwd, CONFIG_DIR_NAME, "mcp.json"),
+    );
+    if (
+      projectConfig?.mcpServers &&
+      Object.keys(projectConfig.mcpServers).length > 0
+    ) {
+      ctx.ui.notify(
+        "This project has a .pi/mcp.json with MCP servers. Run /mcp-enable-project to activate them.",
+        "info",
+      );
+    }
+  });
+
+  // 3. Opt-in via slash command – enables project-local MCP config for the
+  //    current session and connects immediately (no config file changes)
+  pi.registerCommand("mcp-enable-project", {
+    description:
+      "Enable loading .pi/mcp.json for the current project (this session only)",
+    handler: async (_args, ctx) => {
+      const cwd = await canonicalizePath(ctx.cwd);
+      enabledProjects.add(cwd);
+      await loadProjectServers(ctx.cwd);
+      ctx.ui.notify(`Project-local MCP config enabled for ${ctx.cwd}`, "info");
+    },
+  });
+
+  // 4. Cleanup on session shutdown (fires for /reload, /resume, /new, /fork, quit)
   pi.on("session_shutdown", async () => {
     await Promise.all(connections.map((c) => c.cleanup()));
     connections.length = 0;
