@@ -1,0 +1,73 @@
+# Policy configuration.
+#
+# Deny by default: only what matches below is permitted.
+#
+# Copy to /etc/docker/bundle/data.yaml on the host.
+# OPA reloads it every 60-120 seconds.
+
+sandbox:
+  # Host paths mountable read-write.
+  # Each entry covers the path and everything below it.
+  allow_rw_mounts:
+    - /home/tsaarni/work
+    - /tmp
+
+  # Host paths mountable read-only.
+  # /lib/modules is required by kind.
+  allow_ro_mounts:
+    - /lib/modules
+    - /etc/localtime
+    - /etc/resolv.conf
+    - /etc/hosts
+    - /etc/hostname
+
+  # Capabilities grantable via --cap-add.
+  # Docker's default set applies to every container, so this list governs explicit --cap-add requests only.
+  allowed_capabilities:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FSETID
+    - FOWNER
+    - MKNOD
+    - NET_RAW
+    - SETGID
+    - SETUID
+    - SETFCAP
+    - SETPCAP
+    - NET_BIND_SERVICE
+    - SYS_CHROOT
+    - KILL
+    - AUDIT_WRITE
+    - NET_ADMIN
+
+  # Container classes that are privileged by design.
+  # A role grants only what its allow list says.
+  # For supported allow keywords, see role_grants("<keyword>") in the OPA policy.
+  privileged_containers:
+    # kind cluster nodes. Matches image + label + network; all must hold.
+    - name: kind
+      match:
+        images:
+          - kindest/node*
+          - docker.io/kindest/node*
+        require_labels:
+          io.x-k8s.kind.cluster: "*"
+        network:
+          name_prefix: kind
+      allow:
+        privileged: true
+        unconfined_security_opts: true
+        host_userns: true
+
+    # docker buildx create (multi-arch builds). Runs a privileged
+    # moby/buildkit container. No labels or network are set, so the
+    # match is image-only: docker tag <any> moby/buildkit:buildx-stable-1
+    # also matches. Remove the role to refuse buildx create.
+    - name: buildx multiarch
+      match:
+        images:
+          - moby/buildkit*
+          - docker.io/moby/buildkit*
+      allow:
+        privileged: true
+        host_userns: true
