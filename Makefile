@@ -12,7 +12,7 @@ PWD := $(shell pwd)
 install:
 	@echo "Installing agent skills..."
 
-	# Gemini CLI skills
+	# Antigravity CLI skills
 	@mkdir -p "$(HOME)/.gemini"
 	@rm -rf "$(HOME)/.gemini/skills"
 	@ln -sfn "$(PWD)/skills" "$(HOME)/.gemini/skills"
@@ -37,5 +37,9 @@ install:
 	@rm -rf "$(HOME)/.agents/skills"
 	@ln -sfn "$(PWD)/skills" "$(HOME)/.agents/skills"
 	@echo "Linked skills to $(HOME)/.agents/skills"
+
+	# Pi Agent
+	@mkdir -p "$(HOME)/.pi/agent/prompts"
+	@cp -r prompts/*prompt.md "$(HOME)/.pi/agent/prompts/"
 
 	@echo "Done!"
