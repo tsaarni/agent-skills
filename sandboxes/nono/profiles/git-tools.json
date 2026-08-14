@@ -1,0 +1,78 @@
+{
+  "meta": {
+    "name": "git-tools",
+    "version": "1.0.0",
+    "description": "Git with SSH agent chaining. No raw private key access."
+  },
+  "extends": "default",
+  "groups": { "include": ["git_config"] },
+  // git and ssh each run in their own isolated sandbox.
+  "command_policies": {
+    // /usr/libexec/gcc covers gcc internal helpers (cc1, collect2, lto1) invoked by absolute path.
+    // read_dir is shallow so the full nested path is required.
+    "executable_dirs": ["/usr/libexec/gcc/x86_64-linux-gnu/13"],
+    "credentials": {
+      // ssh-agent socket. Used by ssh to authenticate without key files.
+      "ssh-agent": {
+        "type": "local-socket",
+        "path": "$SSH_AUTH_SOCK",
+        "mode": "connect",
+        "env_var": "SSH_AUTH_SOCK"
+      }
+    },
+    "commands": {
+      // git: reads and writes the repo, can call ssh.
+      // fs_read includes /usr and /etc so git and its libraries (libcurl etc.) resolve normally.
+      // The sandbox protects credentials (SSH keys) and controls network, not general system reads.
+      "git": {
+        "can_use": ["ssh"],
+        "from": {
+          "session": {
+            "sandbox": {
+              "fs_read": ["$WORKDIR", "@git:hooks-path", "/usr", "/etc", "$HOME/wiki"],
+              "fs_write": ["$WORKDIR", "@git:common-dir", "@git:toplevel-parent"],
+              "fs_write_file": ["$HOME/.ssh/known_hosts"],
+              "exec_paths": ["/usr/lib/git-core"],
+              "network": { "tcp_connect_ports": [22, 80, 443] },
+              "environment": {
+                "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "GIT_*", "SSH_AUTH_SOCK", "TMPDIR"]
+              }
+            }
+          },
+          // gh calls git for pr checkout, clone, etc. Same sandbox as session.
+          "gh": {
+            "sandbox": {
+              "fs_read": ["$WORKDIR", "@git:hooks-path", "/usr", "/etc", "$HOME/wiki"],
+              "fs_write": ["$WORKDIR", "@git:common-dir", "@git:toplevel-parent"],
+              "fs_write_file": ["$HOME/.ssh/known_hosts"],
+              "exec_paths": ["/usr/lib/git-core"],
+              "network": { "tcp_connect_ports": [22, 80, 443] },
+              "environment": {
+                "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "GIT_*", "SSH_AUTH_SOCK", "TMPDIR"]
+              }
+            }
+          }
+        }
+      },
+      // ssh: only callable from git. Uses agent socket. No key file access.
+      "ssh": {
+        "from": {
+          "git": {
+            "sandbox": {
+              "fs_read": ["/usr", "/etc"],
+              "fs_read_file": ["$HOME/.ssh/config", "$HOME/.ssh/known_hosts"],
+              "fs_write_file": ["$HOME/.ssh/known_hosts"],
+              "use_credentials": ["ssh-agent"],
+              "network": { "tcp_connect_ports": [22] },
+              "environment": {
+                "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "SSH_AUTH_SOCK"]
+              }
+            }
+          },
+          // Direct ssh from agent session is blocked.
+          "session": "deny"
+        }
+      }
+    }
+  }
+}

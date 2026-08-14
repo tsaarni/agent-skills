@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "name": "gh-tools",
+    "version": "1.0.0",
+    "description": "GitHub CLI (gh) with config dir access. Auth via GITHUB_TOKEN env var."
+  },
+  "extends": "default",
+  // gh runs in its own sandbox. Auth uses GITHUB_TOKEN from environment.
+  "command_policies": {
+    "commands": {
+      "gh": {
+        "can_use": ["git"],
+        "from": {
+          "session": {
+            "sandbox": {
+              "fs_read": ["$WORKDIR", "/usr", "/etc", "$HOME/.config/gh", "$HOME/wiki"],
+              "fs_write": ["$HOME/.config/gh"],
+              "network": { "allow_all": true },
+              "environment": {
+                "allow_vars": ["PATH", "HOME", "USER", "LANG", "LC_*", "GITHUB_TOKEN", "GH_TOKEN", "GH_*", "TMPDIR"]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

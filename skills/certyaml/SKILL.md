@@ -1,11 +1,9 @@
 ---
 name: certyaml
-description: Generate x509 certificates and PKI hierarchies for test environments using YAML manifests or Go API. Use for TLS client and server testing.
+description: Use this skill when you need x509 certificates for tests. 
 ---
 
-# Certyaml - X509 Certificate Generation
-
-## Command Line Usage
+## CLI
 
 ```shell
 mkdir -p certs
@@ -24,11 +22,12 @@ certyaml -d certs [path/to/certs.yaml]
 
 The certificate manifest file contains multiple documents separated by `---`, each defining one certificate.
 
-**Key fields**: `subject` (DN, must be unique), `issuer` (references earlier cert's subject), `ca` (bool), `sans` (list), `filename` (output file basename, defaults to CN), `key_type` (EC/RSA/ED25519), `key_size`, `expires` (duration), `not_before`/`not_after` (RFC3339), `key_usages`, `ext_key_usages`, `crl_distribution_points`, `revoked`.
+**Key fields**: `subject` (DN, must be unique), `issuer` (references earlier cert's subject), `ca` (bool), `sans` (list), `filename` (output file basename, defaults to CN), `key_type` (EC/RSA/ED25519, defaults to EC.
+
+Run `certyaml --help-yaml` for full field reference.
 
 **Important**: Certificate order matters - issuer must be defined before it's referenced.
 
-**Full field reference**: https://github.com/tsaarni/certyaml
 
 Example manifest:
 
@@ -49,9 +48,9 @@ ext_key_usages:
   - ClientAuth
 ```
 
-## Kubernetes Secrets
+### Uploading Generated Certs as Kubernetes Secrets
 
-Upload/update certificates as Kubernetes secrets using `--dry-run=client -o yaml | kubectl apply` for idempotent operations:
+Upload/update certificates as Kubernetes secrets 
 
 ```shell
 # TLS secret type (kubernetes.io/tls)
@@ -70,30 +69,10 @@ EOF
 
 ## Go API
 
-Import: `github.com/tsaarni/certyaml`
-
-**Main type**: `Certificate` struct with fields `Subject`, `SubjectAltNames`, `Issuer` (pointer to CA Certificate, nil for self-signed), `IsCA`, `KeyType`, `Expires`, `NotBefore`/`NotAfter`, `KeyUsage`, `ExtKeyUsage`.
-
-**Key methods**: `PEM()`, `TLSCertificate()`, `X509Certificate()`, `WritePEM()`, `Generate()`.
-
-**CRL type**: `CRL` struct. Methods: `Add(cert)`, `PEM()`, `WritePEM()`.
-
-**Full API docs**: https://pkg.go.dev/github.com/tsaarni/certyaml
-**Code examples**: https://github.com/tsaarni/certyaml/blob/master/examples/go-api/main.go
+Refer to source for details, you can find it locally here `go list -m -f '{{.Dir}}' github.com/tsaarni/certyaml@latest`
 
 ```go
 ca := certyaml.Certificate{Subject: "cn=ca"}
 server := certyaml.Certificate{Subject: "cn=server", SubjectAltNames: []string{"DNS:localhost"}, Issuer: &ca}
-tlsCert, err := server.TLSCertificate()  // Use in http.Server TLSConfig
+tlsCert, err := server.TLSCertificate()  // Use in e.g. http.Server TLSConfig
 ```
-
-## Patterns
-
-- **Mandatory field**: Only `subject` is required
-- **Root CA (self-signed)**: Omit `issuer` field
-- **Intermediate CA**: Set `issuer: cn=parent-ca`, `ca: true`
-- **End-entity certificate**: Set `issuer: cn=ca-name`, `ca: false` (default)
-- **Server certificate**: Add `ext_key_usages: [ServerAuth]`
-- **Client certificate**: Add `ext_key_usages: [ClientAuth]`
-- **Certificate Revocation**: Set `revoked: true` to include cert in issuer's CRL file
-- **Certificate chains**: End-entity PEM files include full chain (excluding root CA)

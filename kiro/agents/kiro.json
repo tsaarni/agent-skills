@@ -1,0 +1,115 @@
+{
+  "name": "kiro",
+  "description": "generic agent",
+  "prompt": "You are a general-purpose assistant helping with coding, analysis, writing, and problem-solving.\n\n## Audience\n- The user is an experienced programmer.\n- Do not assume prior knowledge of the specific subject or domain being discussed. Match explanations to a technical background without skipping domain-specific context.\n\n## Communication Style\n- Respond in clear, simple, and direct language.\n- Avoid unnecessary commentary, hyperbole, metaphors, analogies, or performative enthusiasm.\n- Keep explanations concise and factual.\n\n## Tool Rules\n- When invoking subagents via the `use_subagent` tool, you MUST explicitly set `agent_name` to \"kiro\". Never omit `agent_name`.",
+  "tools": [
+    "code",
+    "glob",
+    "goal",
+    "grep",
+    "introspect",
+    "read",
+    "shell",
+    "subagent",
+    "todo_list",
+    "use_aws",
+    "write",
+    "@github/*",
+    "@mcpuppet/*"
+  ],
+  "toolAliases": {},
+  "allowedTools": [
+    "code",
+    "glob",
+    "goal",
+    "grep",
+    "introspect",
+    "read",
+    "subagent",
+    "todo_list",
+    "@github/get_*",
+    "@github/list_*",
+    "@github/search_*",
+    "@github/pull_request_read",
+    "@github/issue_read",
+    "@mcpuppet/*"
+  ],
+  "toolsSettings": {
+    "fs_read": {
+      "allowedPaths": ["./**"]
+    },
+    "shell": {
+      "deniedCommands": [
+        ".*sed .*-i.*",
+        ".*sed .*--in-place.*"
+      ],
+      "allowedCommands": [
+        "gh issue list .*",
+        "gh issue view .*",
+        "gh pr checks .*",
+        "gh pr list .*",
+        "gh pr view .*",
+        "gh pr diff .*",
+        "gh repo view .*",
+        "gh release list .*",
+        "gh release view .*",
+        "gh run list .*",
+        "gh run view .*",
+        "gh search .*",
+        "git status.*",
+        "git log.*",
+        "git show.*",
+        "git diff.*",
+        "git branch.*",
+        "git remote.*",
+        "git ls-files.*",
+        "git ls-remote.*",
+        "git describe.*",
+        "git tag -l.*",
+        "git rev-parse.*",
+        "git merge-base.*",
+        "ls",
+        "cat",
+        "echo",
+        "sort",
+        "test",
+        "grep",
+        "wc",
+        "git show .* \\| sed .*",
+        "git diff .* \\| sed .*",
+        "git log .* \\| sed .*",
+        "sed -n .*",
+        "jq .*"
+      ],
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "skill://~/.kiro/skills/**/SKILL.md",
+    "skill://.kiro/skills/**/SKILL.md"
+  ],
+  "hooks": {},
+  "model": null,
+  "mcpServers": {
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${env:GITHUB_TOKEN}"
+      },
+      "disabled": false
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--browserUrl=http://127.0.0.1:9222"
+      ],
+      "disabled": true
+    },
+    "mcpuppet": {
+      "url": "http://127.0.0.1:5420/mcp",
+      "disabled": false
+    }
+  }
+}

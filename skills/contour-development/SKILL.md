@@ -5,246 +5,241 @@ description: Use when needing development environment with Kind to do developmen
 
 # Contour Development
 
-## Scope
-- **Target**: Contour repository (github.com/projectcontour/contour)
-- **Supported Branches**: `main`, `release-X.Y` branches, and development branches
-- **Platform**: Linux/macOS
-- **Prerequisites**: Contour repository checked out locally, `kind`, `kubectl`, `go`, `make`, `http` (httpie), `docker` installed
-
-
-## Global Preconditions (MUST validate before ANY task)
-
-Execute these checks and CONTINUE only if all pass:
+Verify working directory before any task:
 
 ```bash
-# 1. Verify current directory is Contour repo root
-test -f Makefile && test -f go.mod && grep -q 'module github.com/projectcontour/contour' go.mod && echo "✓ In Contour repo root" || echo "✗ NOT in Contour root"
+test -f go.mod && grep -q 'module github.com/projectcontour/contour' go.mod && echo "OK" || echo "NOT in Contour root"
 ```
 
-CONTINUE to task execution only if all checks pass. Install missing tools or navigate to Contour repo root as needed.
-
-## Critical Warnings
-
-**ALWAYS:**
-- Run `make checkall` before committing changes
-- Use `http` (httpie CLI command) for testing endpoints instead of `curl`
+Use `http` (httpie) instead of `curl` for testing endpoints.
 
 ---
 
-## Task: VS Code Setup for Contour Development
+## Create Kind Cluster
 
-**What this does**: Configures VS Code to support e2e test code navigation and Go completion.
-
-### Step 1: Create VS Code Settings Configuration (REQUIRED)
-
-MUST execute exactly:
 ```bash
-mkdir -p .vscode
-cat <<EOF > .vscode/settings.json
-{
-  "go.buildFlags": [
-    "-tags=e2e"
-  ]
-}
+kind get clusters | grep -q contour && { echo "Cluster 'contour' already exists."; exit 0; }
+
+cat <<EOF | kind create cluster --config - --name contour
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+- role: worker
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    listenAddress: "127.0.0.101"
+  - containerPort: 443
+    hostPort: 443
+    listenAddress: "127.0.0.101"
 EOF
 ```
 
-Expected: `.vscode/settings.json` file created with e2e build tags.
+Install Contour:
 
-Without this configuration, Go language server will not recognize e2e test files as part of the module, resulting in syntax errors and broken code navigation.
-
-### Step 2: Reload Go Language Server (REQUIRED)
-
-MUST execute in VS Code:
-```
-Go: Install/Update Tools → gopls
-```
-
-OR run command in terminal:
 ```bash
-go install github.com/golang/tools/gopls@latest
+kubectl apply -f https://projectcontour.io/quickstart/contour.yaml
+kubectl -n projectcontour wait --for=condition=available --timeout=300s deployment/contour
+kubectl -n projectcontour wait --for=condition=ready --timeout=300s pod -l app=envoy
 ```
 
-Expected: gopls reinstalled and reloaded.
 
-### Step 3: Verify Setup (REQUIRED)
+To use the latest unreleased development build from `main` branch use
 
-MUST open any e2e test file:
-- Navigate to: `test/e2e/` folder
-- Open any `test_*.go` file
-
-Expected: No syntax errors in e2e test files, code navigation working (Ctrl+Click navigates to definitions).
+```bash
+kubectl apply -f https://raw.githubusercontent.com/projectcontour/contour/main/examples/render/contour.yaml
+```
 
 ---
 
-## Task: Run Unit Tests and Linting
-
-**What this does**: Execute local unit tests and code quality checks without requiring a Kind cluster.
-
-**Precondition**: Contour repo root, no changes to CRD files since last `make generate`.
-
-### Step 1: Execute All Quality Checks (REQUIRED)
-
-MUST execute exactly:
-```bash
-make checkall
-```
-
-Expected:
-- All unit tests pass ✓
-- No linting errors ✓
-- No generated code differences (if CRDs unchanged) ✓
-
-IF tests fail: Review error output and fix issues before proceeding.
-IF generated code differs: Execute `make generate` and commit changes.
-
-CONTINUE with other tasks only if `make checkall` exits with status 0.
-
-### Step 2: Run Individual Checks (OPTIONAL)
-
-For faster iteration, use individual commands:
+## Deploy Echoserver
 
 ```bash
-make check      # Unit tests only
-make lint       # Linting only
-make generate   # Code generation (after modifying CRDs)
-```
+kubectl apply -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echoserver
+spec:
+  selector:
+    matchLabels:
+      app: echoserver
+  template:
+    metadata:
+      labels:
+        app: echoserver
+    spec:
+      containers:
+      - name: echoserver
+        image: ghcr.io/tsaarni/echoserver:latest
+        env:
+        - name: ENV_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: ENV_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: ENV_POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: ENV_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: ENV_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        ports:
+        - name: http-api
+          containerPort: 8080
+        - name: https-api
+          containerPort: 8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echoserver
+spec:
+  ports:
+  - name: http
+    port: 80
+    targetPort: http-api
+  - name: http2
+    port: 443
+    targetPort: https-api
+  selector:
+    app: echoserver
+---
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: echoserver
+spec:
+  virtualhost:
+    fqdn: echoserver.127-0-0-101.nip.io
+  routes:
+    - services:
+        - name: echoserver
+          port: 80
+EOF
 
-Expected: Each command completes successfully.
+kubectl wait --for=condition=ready --timeout=300s pod -l app=echoserver
+```
 
 ---
 
-## Task: Setup Local Kind Cluster
+## Delete Kind Cluster
 
-**What this does**: Create and configure local Kubernetes cluster for Contour testing and development.
-
-**Precondition**: Docker daemon running, 6+ GB free disk space.
-
-### Step 1: Create Kind Cluster (NON-REVOCABLE)
-
-MUST execute exactly:
 ```bash
-scripts/create-cluster.sh
+kind delete cluster --name contour
 ```
-
-Expected:
-- Kind cluster named 'contour' created
-- Contour deployed in projectcontour namespace
-- echoserver deployed in echoserver namespace
-- Output ends with: "✓ Cluster ready"
-
-IF script fails: Check error message (usually docker issues), review `kind get clusters` output.
-CONTINUE to next step only if cluster created successfully.
-
-### Step 2: Verify Cluster Health (REQUIRED)
-
-MUST execute:
-```bash
-kubectl cluster-info
-kubectl -n projectcontour get pods -o wide
-kubectl -n echoserver get pods -o wide
-```
-
-Expected:
-- All pods in 'Running' or 'Completed' state
-- contour pod ready (1/1)
-- envoy daemonset pods ready
-- echoserver pod running
-
-IF pods not ready: Wait 30 seconds, check logs with `kubectl -n projectcontour logs deployment/contour`.
 
 ---
 
-## Task: Delete Kind Cluster
+## Run Contour from Source on Host Against Kind Cluster
 
-**What this does**: Remove Kind cluster and free resources when development is complete.
+Patch cluster networking so Envoy connects to Contour running on the host. Run after creating the cluster and before starting Contour on host.
 
-**Precondition**: Kind cluster exists.
+Get the host gateway address:
 
-### Step 1: Delete Cluster (NON-REVOCABLE)
-
-MUST execute exactly:
 ```bash
-scripts/delete-cluster.sh
+HOST_IP=$(docker network inspect kind | jq -r '.[0].IPAM.Config[0].Gateway')
 ```
 
-Expected:
-- Kind cluster deleted
-- Docker containers and networks cleaned up
-- Output: "✓ Cluster deleted"
+Apply service and endpoint pointing to host:
 
-### Step 2: Verify Deletion (REQUIRED)
-
-MUST execute:
 ```bash
-kind get clusters | grep -q contour && echo "✗ Cluster still exists" || echo "✓ Cluster deleted"
-```
-
-Expected: "✓ Cluster deleted"
-
+cat <<EOF | kubectl apply -f -
+kind: Service
+apiVersion: v1
+metadata:
+  name: contour
+  namespace: projectcontour
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8001
+    targetPort: 8001
 ---
-
-## Task: Configure Cluster for Local Contour Development
-
-**What this does**: Patch cluster networking so Envoy (in cluster) can connect to Contour running on host machine.
-
-**Precondition**: Kind cluster running (from "Setup Local Kind Cluster" task), Contour NOT yet running on host.
-
-### Step 1: Apply Cluster Configuration (REQUIRED)
-
-MUST execute exactly:
-```bash
-scripts/prepare-for-contour-on-host.sh
+kind: EndpointSlice
+apiVersion: discovery.k8s.io/v1
+metadata:
+  name: contour-1
+  namespace: projectcontour
+  labels:
+    kubernetes.io/service-name: contour
+addressType: IPv4
+endpoints:
+- addresses:
+  - ${HOST_IP}
+ports:
+- port: 8001
+EOF
 ```
 
-Expected:
-- Service and EndpointSlice modified
-- Envoy DaemonSet redeployed
-- Output confirms configuration applied
+Scale down in-cluster Contour and restart Envoy:
 
-IF script fails: Review error output and resolve before proceeding to Step 2.
-CONTINUE to Step 2 only if configuration applied successfully.
-
-### Step 2: Verify Configuration (REQUIRED)
-
-MUST execute:
 ```bash
-kubectl -n projectcontour get service contour -o wide
-kubectl -n projectcontour get endpointslice -l app=contour
+kubectl -n projectcontour scale deployment contour --replicas=0
+kubectl -n projectcontour delete daemonset -l app=envoy --force
 ```
 
-Expected:
-- Service endpoint points to host machine IP
-- EndpointSlice exists with correct addresses
+Extract TLS certificates for local Contour:
 
-### Step 3: Monitor Envoy Readiness (SEQUENTIAL)
-
-MUST wait for Envoy to reconnect:
 ```bash
-kubectl -n projectcontour logs -f daemonset/envoy -c envoy --tail=20 | grep -i "rds|cds"
+kubectl -n projectcontour get secret contourcert -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+kubectl -n projectcontour get secret contourcert -o jsonpath='{.data.tls\.crt}' | base64 -d > tls.crt
+kubectl -n projectcontour get secret contourcert -o jsonpath='{.data.tls\.key}' | base64 -d > tls.key
 ```
 
-Expected: After 10-20 seconds, log output shows Envoy connecting and receiving configuration.
-Press Ctrl+C to stop log following.
-
----
-
-## Task: Run Contour from Source (Host) with Debugger
-
-**What this does**: Execute Contour on host machine with VS Code debugger attached for real-time debugging.
-
-**Precondition**:
-- Kind cluster prepared with `prepare-for-contour-on-host.sh`
-- VS Code open with Contour repository
-- No Contour instance already running on port 8001
-
-### Step 1: Configure Launch Configuration (REQUIRED - ONE TIME)
-
-MUST create/update `.vscode/launch.json`:
+Run Contour from source on host:
 
 ```bash
-mkdir -p .vscode
-cat <<EOF > .vscode/launch.json
+cd ~/work/contour && runagent run -n contour -- go run ./cmd/contour serve \
+    --xds-address=0.0.0.0 \
+    --xds-port=8001 \
+    --envoy-service-http-port=8080 \
+    --envoy-service-https-port=8443 \
+    --contour-cafile=ca.crt \
+    --contour-cert-file=tls.crt \
+    --contour-key-file=tls.key \
+    --debug
+```
+
+To test config file add `--config-path=/tmp/myconfig.yaml` to the command above.
+
+To test `ContourConfiguration` add `--contour-config-name=contour` to the command above and create resource in cluster:
+
+```yaml
+kind: ContourConfiguration
+metadata:
+  name: contour
+  namespace: projectcontour
+spec:
+  xdsServer:
+    address: 0.0.0.0
+    port: 8001
+    tls:
+      caFile: ca.crt
+      certFile: tls.crt
+      keyFile: tls.key
+  envoy:
+    http:
+      port: 8080
+    https:
+      port: 8443
+```
+
+### VS Code Debugger
+
+If user asks to set up VS code debugging for Contour, create `.vscode/launch.json`:
+
+```json
 {
   "version": "0.2.0",
   "configurations": [
@@ -253,7 +248,7 @@ cat <<EOF > .vscode/launch.json
       "type": "go",
       "request": "launch",
       "mode": "auto",
-      "cwd": "\${workspaceRoot}",
+      "cwd": "${workspaceRoot}",
       "program": "cmd/contour",
       "args": [
         "serve",
@@ -269,579 +264,211 @@ cat <<EOF > .vscode/launch.json
     }
   ]
 }
-EOF
 ```
-
-Expected: `.vscode/launch.json` created in .vscode directory.
-
-### Step 2: Generate TLS Certificates (REQUIRED - ONE TIME)
-
-IF certificates already exist in repo root:
-  - Verify: `ls -la ca.crt tls.crt tls.key` shows all three files
-  - PROCEED to Step 3
-ELSE:
-  - Refer to certyaml skill to generate test certificates
-  - Place in repository root
-
-### Step 3: Start Debugger (SEQUENTIAL)
-
-MUST execute in VS Code:
-```
-Run → Start Debugging (or press F5)
-OR
-Run → Run Without Debugging (Ctrl+F5)
-```
-
-Expected:
-- Debug console appears
-- Output shows: "Contour is starting up"
-- Debugger terminal active
-
-IF debugger fails to start: Check VS Code output panel for build errors.
-IF build fails: Run `make check` to diagnose issues.
-
-### Step 4: Verify Contour Connected (SEQUENTIAL)
-
-In separate terminal, MUST execute:
-```bash
-kubectl -n projectcontour logs -f daemonset/envoy -c envoy | grep -i "config_hash_mismatch" | head -5
-```
-
-Expected: Envoy logs show connection established (may see config_hash messages).
-IF connection fails: Check firewall, verify cluster configuration from previous task.
-
-### Step 5: Test with Breakpoints (OPTIONAL)
-
-To debug specific code:
-
-1. Set breakpoint in code (line number)
-2. Trigger request (use echoserver endpoint from "Test Traffic" task)
-3. Debugger pauses at breakpoint
-4. Inspect variables in VS Code Debug panel
-
-### Step 6: Stop Debugger (REQUIRED)
-
-MUST press: Ctrl+C in debug terminal
-OR click Stop button in VS Code
-
-Expected: Contour process terminates, debug session closes.
 
 ---
 
-## Task: Run Contour from Source (CLI)
+## Build and Deploy Custom Contour Image
 
-**What this does**: Execute Contour on host machine from command line (non-interactive).
+Build from source and deploy into the Kind cluster for in-cluster testing.
 
-**Precondition**:
-- Kind cluster prepared with `prepare-for-contour-on-host.sh`
-- TLS certificates available (ca.crt, tls.crt, tls.key)
-- No other Contour instance running on port 8001
-
-### Step 1: Start Contour (SEQUENTIAL)
-
-MUST execute exactly:
-```bash
-go run github.com/projectcontour/contour/cmd/contour serve \
-  --xds-address=0.0.0.0 \
-  --xds-port=8001 \
-  --envoy-service-http-port=8080 \
-  --envoy-service-https-port=8443 \
-  --contour-cafile=ca.crt \
-  --contour-cert-file=tls.crt \
-  --contour-key-file=tls.key \
-  --debug
-```
-
-Expected:
-- No build errors
-- Output: "Contour is starting up"
-- Process continues running, ready for requests
-
-IF fails to start: Check TLS certificate files exist.
-IF port already in use: Kill existing Contour process first.
-
-### Step 2: Verify Connection (SEQUENTIAL - NEW TERMINAL)
-
-In separate terminal, MUST execute:
-```bash
-http http://localhost:8000/debug/dag | head -20
-```
-
-Expected: JSON output showing Contour's internal DAG (Directed Acyclic Graph).
-IF connection refused: Wait 5 seconds, Contour may still be initializing.
-
-### Step 3: Keep Running (SEQUENTIAL)
-
-Contour CLI process must continue running. To stop:
-- Press Ctrl+C in the terminal
-- Expected: Clean shutdown, no errors
-
----
-
-## Task: Build and Deploy Custom Contour Image to Cluster
-
-**What this does**: Build Contour container image from source code and deploy to Kind cluster for fully in-cluster testing.
-
-**Precondition**:
-- Kind cluster running
-- Docker daemon running
-- Sufficient disk space for image build (~500MB)
-
-### Step 1: Build CONTOUR Container Image (SEQUENTIAL)
-
-MUST execute exactly:
 ```bash
 make container VERSION=latest
-```
-
-Expected:
-- Docker image built successfully
-- Output ends with: "Successfully built" or "Successfully tagged"
-- Image named: `ghcr.io/projectcontour/contour:latest`
-
-VERIFY:
-```bash
-docker images | grep projectcontour/contour
-```
-
-Expected: Image with tag 'latest' appears in list.
-
-### Step 2: Load Image into Kind Cluster (SEQUENTIAL)
-
-MUST execute exactly:
-```bash
 kind load docker-image ghcr.io/projectcontour/contour:latest --name contour
 ```
 
-Expected:
-- No errors
-- Image available in cluster
+Patch deployments to use local image (first time only):
 
-CONTINUE to next step only if this step succeeds; verify cluster exists with `kind get clusters` if needed.
-
-### Step 3: Patch Deployments to Use Custom Image (SEQUENTIAL - ONE TIME)
-
-MUST execute:
 ```bash
-kubectl -n projectcontour patch deployment contour --patch-file=assets/contour-deployment-patch.yaml
-kubectl -n projectcontour patch daemonset envoy --patch-file=assets/envoy-daemonset-patch.yaml
+kubectl -n projectcontour patch deployment contour --patch '
+spec:
+  template:
+    spec:
+      containers:
+      - name: contour
+        image: localhost/contour:latest
+        imagePullPolicy: Never'
+
+kubectl -n projectcontour patch daemonset envoy --patch '
+spec:
+  template:
+    spec:
+      containers:
+      - name: shutdown-manager
+        image: localhost/contour:latest
+        imagePullPolicy: Never
+      initContainers:
+      - name: envoy-initconfig
+        image: localhost/contour:latest
+        imagePullPolicy: Never'
 ```
 
-Expected:
-- Deployments patched (output shows patch applied)
-- Pods will begin redeploying
+Wait for rollout:
 
-IF patch fails: Verify patch files exist in `assets/` directory.
-
-### Step 4: Verify Rollout (SEQUENTIAL)
-
-MUST execute:
 ```bash
 kubectl -n projectcontour rollout status deployment/contour --timeout=2m
 kubectl -n projectcontour rollout status daemonset/envoy --timeout=2m
 ```
 
-Expected:
-- "rollout successfully completed" message
-
-IF rollout times out: Review deployment events and logs:
-```bash
-kubectl -n projectcontour describe deployment contour
-kubectl -n projectcontour logs deployment/contour --tail=20
-```
-
-### Step 5: Verify Custom Image Running (REQUIRED)
-
-MUST execute:
-```bash
-kubectl -n projectcontour describe pod -l app=contour | grep Image: | head -1
-```
-
-Expected: Image contains 'latest' tag or custom VERSION you used.
-
-### Step 6: Repeated Testing (ONE PER CODE CHANGE)
-
-For subsequent code changes, REPEAT only Steps 1-2, then:
+For subsequent code changes, rebuild and restart:
 
 ```bash
-# Force pod restart to use updated image
+make container VERSION=latest
+kind load docker-image ghcr.io/projectcontour/contour:latest --name contour
 kubectl -n projectcontour rollout restart deployment/contour
 kubectl -n projectcontour rollout status deployment/contour --timeout=2m
 ```
 
-Expected: New pods running with updated code.
+---
+
+## Run Unit Tests and Linting
+
+```bash
+make checkall    # All checks (unit tests + lint + generated code diff)
+make check       # Unit tests only
+make lint        # Lint only
+make generate    # Regenerate code after CRD changes
+```
 
 ---
 
-## Task: Run End-to-End Tests (Makefile Workflow)
+## Run End-to-End Tests (Makefile Workflow)
 
-**What this does**: Execute e2e test suite using the Makefile targets that manage the Kind cluster, image builds, and test execution.
+Use the Makefile targets that manage a separate `contour-e2e` Kind cluster.
 
-**Precondition**: Docker daemon running, `kind`, `kubectl`, `go`, `make` installed.
-
-### Step 1: Create Kind Cluster and Load Contour Image (FIRST TIME)
-
-MUST execute:
 ```bash
-make setup-kind-cluster load-contour-image-kind
+make setup-kind-cluster load-contour-image-kind   # Create cluster and build/load image
+make run-e2e                                       # Run all e2e tests
 ```
 
-Expected:
-- Kind cluster `contour-e2e` created (or reused if already exists)
-- MetalLB, cert-manager, Gateway API CRDs, and Contour CRDs deployed
-- Contour container image built and loaded into kind nodes
+Run focused tests:
 
-### Step 2: Run All E2E Tests (SEQUENTIAL)
-
-MUST execute:
-```bash
-make run-e2e
-```
-
-Expected:
-- Ginkgo runs all e2e test suites (httpproxy, gateway, infra, ingress, etc.)
-- Tests start local Contour and use in-cluster Envoy
-- Results reported at end
-
-### Step 3: Run Focused Tests (OPTIONAL)
-
-To run only tests matching a regex pattern:
 ```bash
 make run-e2e CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
-```
-
-To limit to a specific test package:
-```bash
 make run-e2e CONTOUR_E2E_PACKAGE_FOCUS=./test/e2e/httpproxy CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
 ```
 
-Both can be combined with `setup-kind-cluster` if the cluster needs to be created first:
+For verbose output, run ginkgo directly:
+
 ```bash
-make setup-kind-cluster run-e2e CONTOUR_E2E_PACKAGE_FOCUS=./test/e2e/httpproxy CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
-```
-
-Expected: Only matching tests execute.
-
-### Step 4: Run with Verbose Output (OPTIONAL)
-
-The Makefile does not support passing extra ginkgo flags. For verbose output (`-v` or `-vv`), run ginkgo directly:
-```bash
-CONTOUR_E2E_LOCAL_HOST=$(make -s print-local-ip 2>/dev/null || ifconfig | grep inet | grep -v '::' | grep -v 'inet 127.' | head -n1 | awk '{print $2}') \
+CONTOUR_E2E_LOCAL_HOST=$(make -s print-local-ip) \
 CONTOUR_E2E_IMAGE=ghcr.io/projectcontour/contour:main \
 go run github.com/onsi/ginkgo/v2/ginkgo -tags=e2e -vv -poll-progress-after=120s \
   --focus "httpproxy-jwt" ./test/e2e/httpproxy/
 ```
 
-Expected: Full per-step output including GinkgoWriter logs.
+After code changes, rebuild image then re-run tests:
 
-### Step 5: Clean Up Stale Namespaces (IF NEEDED)
+```bash
+make load-contour-image-kind
+make run-e2e
+```
 
-If tests fail mid-run, namespaces may be left behind causing subsequent runs to fail with "namespace already exists":
+Clean up: `make cleanup-kind`
+
+---
+
+## Run End-to-End Tests (Development Cluster)
+
+Run e2e tests against the scripts-based development cluster.
+
+```bash
+CONTOUR_E2E_LOCAL_HOST=127.0.0.101 make run-e2e
+CONTOUR_E2E_TEST_FOCUS="some test name" CONTOUR_E2E_LOCAL_HOST=127.0.0.101 make run-e2e
+```
+
+If tests fail mid-run and leave namespaces behind:
+
 ```bash
 kubectl delete ns <test-namespace> --ignore-not-found
 ```
 
-The namespace name is derived from the test registration name (e.g., `httpproxy-jwt-local-jwks`).
-
-### Step 6: Rebuild Image After Code Changes (SEQUENTIAL)
-
-After modifying Contour source, rebuild and reload the image:
-```bash
-make load-contour-image-kind
-```
-
-Then re-run tests (Step 2 or 3). No cluster restart needed.
-
-### Step 7: Delete Cluster (OPTIONAL)
-
-```bash
-make cleanup-kind
-```
-
-Expected: Kind cluster `contour-e2e` deleted.
-
 ---
 
-## Task: Run End-to-End Tests (Development Cluster)
+## Test Traffic
 
-**What this does**: Execute e2e test suite against the scripts-based development Kind cluster.
-
-**Precondition**:
-- Kind cluster running and healthy (from setup task)
-- No local Contour running on port 8001 (use in-cluster Contour)
-- VS Code setup completed (for code navigation)
-
-### Step 1: Run All E2E Tests (SEQUENTIAL)
-
-MUST execute exactly:
-```bash
-CONTOUR_E2E_LOCAL_HOST=127.0.0.101 make run-e2e
-```
-
-Note: On macOS, use `127.0.0.1` instead:
-```bash
-CONTOUR_E2E_LOCAL_HOST=127.0.0.1 make run-e2e
-```
-
-Expected:
-- Tests execute and report results at end
-- Output shows: "ok" or "failed" status
-
-IF tests hang: Ctrl+C to abort, check cluster health with `kubectl get pods -A`.
-IF tests fail: Review failure message, consult test logs.
-
-### Step 2: Run Specific E2E Tests (OPTIONAL)
-
-To run only tests matching a pattern, execute:
-```bash
-CONTOUR_E2E_TEST_FOCUS="external name services work over https" CONTOUR_E2E_LOCAL_HOST=127.0.0.101 make run-e2e
-```
-
-Expected: Only matching tests execute.
-
-Decision:
-- IF test passes: Feature works correctly
-- IF test fails: Review failure message and debug with logs from previous task
-
-### Step 3: Review Test Output (REQUIRED)
-
-Key output sections:
-- Test names and results (PASS/FAIL)
-- Summary statistics at end
-- Timing information
-
-IF interested in specific test details:
-```bash
-# View test source
-find test/e2e -name "*.go" -type f -exec grep -l "external name services" {} \;
-```
-
----
-
-## Task: Test Traffic With Echoserver
-
-**What this does**: Send HTTP requests to test Contour routing and Envoy configuration.
-
-**Precondition**:
-- Kind cluster running with echoserver deployed
-- `httpie` installed locally
-- Proper hostname resolution to 127.0.0.101 (or 127.0.0.1 on macOS)
-
-### Step 1: Verify Echoserver Accessibility (REQUIRED)
-
-MUST execute:
 ```bash
 http http://echoserver.127-0-0-101.nip.io/host
 ```
 
-Note: On macOS:
-```bash
-http http://echoserver.127-0-0-1.nip.io/host
-```
-
-Expected:
-- HTTP 200 response
-- JSON response with host information
-- No connection errors
-
-IF connection refused: Cluster not properly configured, check Envoy logs.
-
-### Step 2: Run Load Test (OPTIONAL)
-
-For basic load testing:
-```bash
-go run github.com/tsaarni/echoclient/cmd/echoclient@latest get \
-  -url http://echoserver.127-0-0-101.nip.io \
-  -concurrency 10 \
-  -duration 10s
-```
-
-Expected:
-- Requests complete successfully
-- Output shows request statistics (latency, throughput)
-- No errors reported
+Load test: see `echoclient` skill for more info.
 
 ---
 
-## Task: Inspect Contour Metrics and Debug Info
+## Inspect Contour Debug Endpoints
 
-**What this does**: Access Contour debug endpoints for runtime inspection.
+If Contour runs in-cluster, port-forward first:
 
-**Precondition**: Contour running (either on host or in cluster)
+```bash
+runagent run -n contour-debug-port-forward -- kubectl -n projectcontour port-forward deployment/contour 8000:8000
+```
 
-### Step 1: Forward Contour Debug Port (REQUIRED)
+Then use the debug API:
 
-If Contour running on host:
-  - Already accessible at `localhost:8000`
-  - PROCEED to Step 2
-
-If Contour running in cluster:
-  - MUST execute:
-  ```bash
-  kubectl -n projectcontour port-forward deployment/contour 8000:8000
-  ```
-  - PROCEED to Step 2
-
-### Step 2: Access Debug Endpoints
-
-**Metrics**:
 ```bash
 http localhost:8000/metrics | head -50
-```
-
-**Internal DAG State**:
-```bash
-http localhost:8000/debug/dag | jq . | less
-```
-
-**Profiling Info**:
-```bash
+http localhost:8000/debug/dag | jq .
 http localhost:8000/debug/pprof/
 ```
 
-Expected: JSON or text responses with debug information.
-
 ---
 
-## Task: Inspect Envoy Configuration (Cluster Only)
+## Inspect Envoy Admin API
 
-**What this does**: Access Envoy admin API to inspect runtime configuration, routes, and clusters.
-
-**Precondition**:
-- Kind cluster running with Envoy DaemonSet
-- kubectl available
-
-### Step 1: Forward Envoy Admin Port (SEQUENTIAL)
-
-MUST execute:
 ```bash
-kubectl -n projectcontour port-forward daemonset/envoy 9001:9001
+runagent run -n envoy-admin-port-forward -- kubectl -n projectcontour port-forward daemonset/envoy 9001:9001
 ```
 
-Expected: Port forward active, ready for queries.
+Then use the admin API
 
-### Step 2: Inspect Envoy State (NEW TERMINAL - SEQUENTIAL)
-
-**Full Configuration with EDS**:
 ```bash
-http http://localhost:9001/config_dump?include_eds | jq '.configs[].dynamic_active_clusters' | head -50
-```
-
-**Route Configuration**:
-```bash
-http http://localhost:9001/config_dump | jq '.configs[].dynamic_route_configs' | head -50
-```
-
-**Cluster Statistics**:
-```bash
+http http://localhost:9001/config_dump?include_eds | jq '.configs[].dynamic_active_clusters'
+http http://localhost:9001/config_dump | jq '.configs[].dynamic_route_configs'
 http http://localhost:9001/clusters
-```
-
-**Available Listeners**:
-```bash
 http http://localhost:9001/listeners
 ```
 
-Expected: JSON output showing Envoy's current state.
-
-### Step 3: Stop Port Forward (REQUIRED)
-
-Press Ctrl+C in port-forward terminal.
-
-Expected: Port forward terminates cleanly.
-
 ---
 
-## Task: View Contour and Envoy Logs
+## View Logs
 
-**What this does**: Stream and inspect runtime logs for debugging.
-
-**Precondition**: Kind cluster running, kubectl available
-
-### Step 1: Stream Contour Logs (SEQUENTIAL)
-
-MUST execute:
 ```bash
 kubectl -n projectcontour logs -f deployment/contour --tail=50
-```
-
-Expected:
-- Real-time log streaming
-- Shows Contour startup and configuration updates
-
-Press Ctrl+C to stop streaming.
-
-### Step 2: Stream Envoy Logs (SEQUENTIAL)
-
-MUST execute:
-```bash
 kubectl -n projectcontour logs -f daemonset/envoy -c envoy --tail=50
+kubectl -n projectcontour logs deployment/contour --previous --tail=100  # After crash
 ```
-
-Expected:
-- Real-time Envoy proxy logs
-- Shows request processing and configuration updates
-
-### Step 3: View Previous Container Logs (OPTIONAL)
-
-IF pod crashed, view previous container logs:
-```bash
-kubectl -n projectcontour logs deployment/contour --previous --tail=100
-```
-
-Expected: Logs from crashed container instance.
 
 ---
 
-## Task: Update Website Documentation
+## VS Code Setup for E2E Tests
 
-**What this does**: Preview and edit Contour website documentation locally.
+Create `.vscode/settings.json` to enable Go language server support for e2e test files:
 
-**Precondition**: Hugo installed, site/ directory exists
-
-### Step 1: Start Hugo Server (SEQUENTIAL)
-
-MUST execute:
-```bash
-cd site && hugo server --disableFastRender
+```json
+{
+  "go.buildFlags": ["-tags=e2e"]
+}
 ```
-
-Expected:
-- Hugo builds site
-- Output: "Web Server is available at http://localhost:1313"
-
-### Step 2: View Documentation (SEQUENTIAL - NEW BROWSER)
-
-Navigate to: http://localhost:1313
-
-Expected:
-- Contour documentation website loads
-- Live editing: changes to markdown files auto-reload
-
-### Step 3: Make Edits (SEQUENTIAL)
-
-Edit markdown files in `site/content/` directory.
-
-Expected:
-- Changes appear in browser after save (may need refresh)
-
-### Step 4: Stop Server (REQUIRED)
-
-Press Ctrl+C in Hugo terminal.
-
-Expected: Server stops cleanly.
 
 ---
 
-## Development Guidelines
+## Website Documentation
 
-**Before Committing**: MUST run `make checkall` successfully
+Run the doc site locally 
 
-**After Modifying CRDs**: MUST run `make generate` to regenerate code
+```bash
+runagent run -n hugo-site --cwd /home/tsaarni/work/contour/site -- hugo server --disableFastRender 
+```
 
-**New Features**: Add e2e tests in `test/e2e/`
+View at http://localhost:1313. Edit markdown in `site/content/`.
 
-**Code Changes**: Write unit tests in corresponding `*_test.go` files
+---
+
+## Development Rules
+
+- Run `make generate` after modifying CRDs.
+- Add e2e tests in `test/e2e/` for new features.
+- Write unit tests in corresponding `*_test.go` files.
 
 ---
 
@@ -849,14 +476,12 @@ Expected: Server stops cleanly.
 
 - Contour docs: https://projectcontour.io/docs/
 - Contour repo: https://github.com/projectcontour/contour
-- Contour helm chart: https://github.com/projectcontour/helm-charts
 - Contour CRDs: https://projectcontour.io/docs/main/config/api/
-- Contour config file and command-line flags: https://projectcontour.io/docs/main/configuration/
+- Contour config: https://projectcontour.io/docs/main/configuration/
 - Envoy docs: https://www.envoyproxy.io/docs/envoy/latest/
 - Envoy XDS API: https://www.envoyproxy.io/docs/envoy/latest/api-v3/api
-- Envoy Admin REST API: https://www.envoyproxy.io/docs/envoy/latest/operations/admin.html
-- Envoy statistics: https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_conn_man/stats and https://www.envoyproxy.io/docs/envoy/latest/configuration/upstream/cluster_manager/cluster_stats
+- Envoy admin: https://www.envoyproxy.io/docs/envoy/latest/operations/admin.html
 - Kind docs: https://kind.sigs.k8s.io/
-- Echoserver docs: https://github.com/tsaarni/echoserver
-- HTTPie docs: https://httpie.io/docs
-- Echoclient docs: https://github.com/tsaarni/echoclient
+- Echoserver: https://github.com/tsaarni/echoserver
+- Echoclient: https://github.com/tsaarni/echoclient
+- HTTPie: https://httpie.io/docs

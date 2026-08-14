@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "name": "kiro",
+    "version": "1.0.0",
+    "description": "Kiro CLI coding agent with broad dev tool access"
+  },
+  // Inherit base deny rules, git/ssh sandbox from git-tools, gh sandbox from gh-tools.
+  "extends": ["default", "git-tools", "gh-tools"],
+  // The launch directory gets read+write access.
+  "workdir": { "access": "readwrite" },
+  // Groups grant read access to runtime directories that tools need.
+  "groups": {
+    "include": [
+      "system_read_linux_core",
+      "linux_sysfs_read",
+      "linux_runtime_state",
+      "user_tools",
+      "go_runtime",
+      "go_runtime_linux",
+      "node_runtime",
+      "mise_manager",
+      "rust_runtime",
+      "java_runtime",
+      "python_runtime"
+    ]
+  },
+  "filesystem": {
+    // Read+write. Agent reads and writes these directories.
+    "allow": [
+      "$HOME/work",
+      "$HOME/.kiro",
+      "$XDG_DATA_HOME/kiro-cli",
+      "$HOME/.kube",
+      "$HOME/go/pkg",
+      "$HOME/go/src",
+      "$HOME/sdk",
+      "$HOME/.cache/go-build",
+      "$XDG_STATE_HOME/runagent",
+      "/tmp",
+      "/var/tmp",
+      "$HOME/.cache/",
+      "$HOME/.agents/"
+    ],
+    // Read only.
+    // NOTE: directories with binaries must be chmod 755 (not 775).
+    // Tool-sandbox exec gate rejects group-writable directories.
+    "read": [
+      "/usr",
+      "/etc",
+      "/proc",
+      "/sys",
+      "/opt",
+      "$HOME/.local/bin",
+      "$HOME/.rbenv",
+      "$HOME/.krew",
+      "$HOME/wiki",
+      "$HOME/package"
+    ],
+    // Lift the default deny on ~/.kube so the allow above takes effect.
+    "bypass_protection": ["$HOME/.kube"],
+    "unix_socket": ["/run/docker.sock", "$XDG_RUNTIME_DIR/runagent/daemon.sock"],
+    // Allow sockets under /tmp: ssh-agent socket path is dynamic, tool-sandbox supervisor socket.
+    "unix_socket_subtree": ["/tmp"],
+    "suppress_save_prompt": ["/var/run/nscd/socket"]
+  },
+  "network": { "block": false },
+  // Block all Unix sockets except those listed above.
+  // Prevents access to D-Bus, KWallet, GNOME keyring.
+  "linux": { "af_unix_mediation": "pathname" }
+}

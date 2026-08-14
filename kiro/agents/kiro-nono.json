@@ -1,0 +1,99 @@
+{
+  "name": "kiro-nono",
+  "description": "Sandbox agent - allows most operations, blocks external submissions",
+  "prompt": "You are a general-purpose assistant helping with coding, analysis, writing, and problem-solving.\n\n## Audience\n- The user is an experienced programmer.\n- Do not assume prior knowledge of the specific subject or domain being discussed. Match explanations to a technical background without skipping domain-specific context.\n\n## Communication Style\n- Respond in clear, simple, and direct language.\n- Avoid unnecessary commentary, hyperbole, metaphors, analogies, or performative enthusiasm.\n- Keep explanations concise and factual.\n\n## Tool Rules\n- When invoking subagents via the `use_subagent` tool, you MUST explicitly set `agent_name` to \"kiro-nono\". Never omit `agent_name`.\n-  You are running in a sandbox. Any unexpected operation failure is likely due to sandbox restrictions. Stop immediately on the first failure, describe what happened, and ask the user for instructions. Do not attempt workarounds or retries.",
+  "tools": [
+    "code",
+    "glob",
+    "goal",
+    "grep",
+    "introspect",
+    "read",
+    "shell",
+    "subagent",
+    "todo_list",
+    "use_aws",
+    "write",
+    "@github/*",
+    "@mcpuppet/*"
+  ],
+  "toolAliases": {},
+  "allowedTools": [
+    "read",
+    "write",
+    "shell",
+    "grep",
+    "glob",
+    "code",
+    "subagent",
+    "todo_list",
+    "@github/get_*",
+    "@github/list_*",
+    "@github/search_*",
+    "@github/pull_request_read",
+    "@github/issue_read",
+    "@mcpuppet/*"
+  ],
+  "toolsSettings": {
+    "fs_read": {
+      "allowedPaths": ["./**", "~/**"]
+    },
+    "write": {
+      "allowedPaths": ["./**"]
+    },
+    "shell": {
+      "deniedCommands": [
+        "^git\\s+push(\\s|$).*",
+        "^gh\\s+pr\\s+create(\\s|$).*",
+        "^gh\\s+pr\\s+merge(\\s|$).*",
+        "^gh\\s+pr\\s+close(\\s|$).*",
+        "^gh\\s+pr\\s+comment(\\s|$).*",
+        "^gh\\s+pr\\s+review(\\s|$).*",
+        "^gh\\s+pr\\s+edit(\\s|$).*",
+        "^gh\\s+issue\\s+create(\\s|$).*",
+        "^gh\\s+issue\\s+close(\\s|$).*",
+        "^gh\\s+issue\\s+comment(\\s|$).*",
+        "^gh\\s+issue\\s+edit(\\s|$).*",
+        "^gh\\s+issue\\s+delete(\\s|$).*",
+        "^gh\\s+release\\s+create(\\s|$).*",
+        "^gh\\s+release\\s+delete(\\s|$).*",
+        "^gh\\s+repo\\s+create(\\s|$).*",
+        "^gh\\s+repo\\s+delete(\\s|$).*",
+        "^gh\\s+repo\\s+fork(\\s|$).*",
+        "^gh\\s+gist\\s+create(\\s|$).*"
+      ],
+      "allowedCommands": [
+        ".*"
+      ],
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "skill://~/.kiro/skills/**/SKILL.md",
+    "skill://.kiro/skills/**/SKILL.md"
+  ],
+  "hooks": {},
+  "model": null,
+  "mcpServers": {
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${env:GITHUB_TOKEN}"
+      },
+      "disabled": false
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--browserUrl=http://127.0.0.1:9222"
+      ],
+      "disabled": true
+    },
+    "mcpuppet": {
+      "url": "http://127.0.0.1:5420/mcp",
+      "disabled": false
+    }
+  }
+}
