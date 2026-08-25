@@ -7,8 +7,14 @@ description: Use when persisting knowledge, recording findings, capturing ideas,
 
 Persistent, compounding memory. Capture once, update in place, never re-derive.
 
-Use simplified technical english.
-Do not repeat yourself.
+## Rules
+
+1. Writing / updating memory records
+- Use dense caveman syntax to maximize information density per token
+
+2. User communication
+- Translate stored knowledge into clean, concise, simplified technical English
+- Do not expose raw caveman syntax to the user
 
 ## Structure
 
@@ -53,7 +59,7 @@ updated: 2026-07-27
 ---
 ```
 
-Content is markdown.
+Content is markdown but otherwise there isn't any expectations or conventions for the formatting of content.
 
 ## Tags
 
@@ -105,4 +111,3 @@ Log entry examples:
 2026-08-01T16:45 | contour | Deleted, no longer relevant | ContourHotRestart.md
 2026-08-01T16:45 | contour | Renamed from ContourHotReload.md | ContourHotRestart.md
 ```
-

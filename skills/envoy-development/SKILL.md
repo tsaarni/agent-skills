@@ -105,6 +105,15 @@ Common additions: `envoy.config_subscription.grpc`, `envoy.clusters.eds`, `envoy
 
 ### Format Source Code
 
+Quick format and spelling check before committing:
+
+```bash
+tools/local_fix_format.sh          # uncommitted changes (default)
+tools/local_fix_format.sh -main    # all changes since main
+```
+
+For individual files:
+
 ```bash
 bazel run //tools/code_format:check_format -- fix <directrory>
 ```
