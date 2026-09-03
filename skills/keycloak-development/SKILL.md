@@ -29,9 +29,34 @@ mvn install -DskipTests -pl federation/ldap/ # Example: after editing LDAP feder
 
 ### Development Mode
 ```bash
-./mvnw -f quarkus/server/pom.xml compile quarkus:dev -Dkc.config.built=true -Dquarkus.args="start-dev --db=dev-mem" -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin  # Start with in-memory H2 database (configuration resets on restart)
-./mvnw -f quarkus/server/pom.xml compile quarkus:dev -Dkc.config.built=true -Dquarkus.args="start-dev -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin -Dkc.db=postgres -Dkc.db-url=jdbc:postgresql://localhost/keycloak -Dkc.db-username=keycloak -Dkc.db-password=keycloak" # Requires running docker compose with PostgreSQL container
+runagent delete keycloak --force >/dev/null 2>&1
+runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
+  -Dkc.config.built=true -Dquarkus.args="start-dev --db=dev-mem" \
+  -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin
+for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/master 2>/dev/null && { echo "ready after ${i}s"; break; }; sleep 1; done
 ```
+
+With PostgreSQL (requires running docker compose with PostgreSQL container):
+```bash
+runagent delete keycloak --force >/dev/null 2>&1
+runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
+  -Dkc.config.built=true \
+  -Dquarkus.args="start-dev -Dkc.db=postgres -Dkc.db-url=jdbc:postgresql://localhost/keycloak -Dkc.db-username=keycloak -Dkc.db-password=keycloak" \
+  -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin
+for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/master 2>/dev/null && { echo "ready after ${i}s"; break; }; sleep 1; done
+```
+
+### Per-Category Debug Logging
+```bash
+runagent delete keycloak --force >/dev/null 2>&1
+runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
+  -Dkc.config.built=true \
+  '-Dquarkus.args=start-dev --db=dev-mem --log-level=org.keycloak.services.resources.admin.AdminRoot:debug,org.keycloak.services.managers.AuthenticationManager:debug' \
+  -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin
+for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/master 2>/dev/null && { echo "ready after ${i}s"; break; }; sleep 1; done
+```
+
+The `--log-level` flag accepts comma-separated `category:level` pairs. This enables DEBUG for specific classes without the noise of global debug logging.
 
 ## Debugging in VS Code
 

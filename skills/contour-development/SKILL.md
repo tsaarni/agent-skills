@@ -235,6 +235,8 @@ spec:
       port: 8443
 ```
 
+Note: In this case the address, port and certificates need to be configured in `ContourConfiguration` and not in command line.
+
 ### VS Code Debugger
 
 If user asks to set up VS code debugging for Contour, create `.vscode/launch.json`:

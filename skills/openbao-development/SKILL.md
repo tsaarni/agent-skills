@@ -145,3 +145,11 @@ See source code for more details
   - `secret/pki.mdx` — PKI certificates
   - `auth/` — auth methods (cert, ldap, jwt, approle, userpass, etc.)
   - `system/` — sys endpoints (init, unseal, mounts, health, leases, storage/raft)
+
+## Run Website Locally
+
+
+```bash
+cd website
+make          # serves at http://localhost:3000/openbao
+```

@@ -271,6 +271,179 @@ git tag 26.2.14-nordix-1
    - For security fixes: explain how the security fix logic was preserved while merging with other changes
 
 
+## Interactive LDAP Federation Testing
+
+Manual testing of LDAP federation with protocol-level capture. Covers simple bind, StartTLS, connection pooling, and SASL EXTERNAL.
+
+### Prerequisites
+
+- Keycloak built from the nordix branch
+- Docker (for OpenLDAP container)
+- `certyaml` for certificate generation
+- `runagent` for managing background processes
+- The devenvs keycloak setup at `$HOME/work/devenvs/keycloak`
+
+### Step 1: Generate Certificates
+
+```bash
+cd $HOME/work/devenvs/keycloak
+rm -rf certs && mkdir certs && certyaml -d certs configs/certs.yaml
+```
+
+Key files produced:
+- `openldap.pem` — server cert (issued by `internal-server-ca`)
+- `ldap-admin.pem` — client cert for SASL EXTERNAL (subject: `CN=ldap-admin,OU=users,O=example`, matches LDAP admin DN)
+- `internal-server-ca.pem` — CA that issued the server cert
+
+Create Java truststore for Keycloak:
+```bash
+keytool -importcert -noprompt -keystore /tmp/ldap-truststore.jks \
+  -storepass changeit -alias internal-server-ca \
+  -file $HOME/work/devenvs/keycloak/certs/internal-server-ca.pem
+```
+
+### Step 2: Start OpenLDAP
+
+The OpenLDAP container image at `$HOME/work/devenvs/keycloak/docker/openldap/` includes:
+- `sslkeylog` library (LD_PRELOAD) — dumps TLS session keys to `/output/wireshark-keys.log` for decryption
+- `tshark` for in-container packet capture
+
+```bash
+runagent run -n openldap -- docker compose -f $HOME/work/devenvs/keycloak/docker-compose.yaml up openldap --build
+runagent logs openldap --last 5  # Verify "slapd starting"
+```
+
+LDAP server details:
+- Ports: 389 (LDAP), 636 (LDAPS)
+- Base DN: `o=example`
+- Users DN: `ou=users,o=example`
+- Admin bind: `cn=ldap-admin,ou=users,o=example` / password: `ldap-admin`
+- Test users: `user1`/`user1`, `user2`/`user2`
+- TLS verify client: `allow` (accepts but does not require client certs)
+- ACL: members of `cn=admins,ou=groups,o=example` have write access; `ldap-admin` is a member
+
+### Step 3: Start tshark Capture
+
+Run tshark inside the OpenLDAP container. It has root privileges and access to the TLS key log for decryption.
+
+```bash
+runagent run -n tshark -- docker exec keycloak-openldap-1 tshark \
+  -i any -f "port 389 or port 636" \
+  -o tls.keylog_file:/output/wireshark-keys.log -O ldap
+```
+
+Reading captured messages:
+```bash
+runagent logs tshark --last 50                              # Recent messages
+runagent logs tshark --time-range "15:05:34..+2m"           # Time window
+runagent logs tshark --last 300 | grep "LDAPMessage"        # Summary only
+```
+
+### Step 4: Build and Start Keycloak
+
+```bash
+cd /path/to/keycloak-worktree/{version}-nordix
+mvn clean install -DskipTestsuite -DskipExamples -DskipTests
+```
+
+Start with truststore and LDAP client cert (for SASL EXTERNAL):
+```bash
+runagent delete keycloak --force >/dev/null 2>&1
+runagent run -n keycloak -- mvn -f quarkus/server/pom.xml compile quarkus:dev \
+  -Dkc.config.built=true \
+  "-Dquarkus.args=start-dev --db=dev-mem \
+    --spi-truststore-file-file=/tmp/ldap-truststore.jks \
+    --spi-truststore-file-password=changeit \
+    --spi-keystore-default-ldap-certificate-file=$HOME/work/devenvs/keycloak/certs/ldap-admin.pem \
+    --spi-keystore-default-ldap-certificate-key-file=$HOME/work/devenvs/keycloak/certs/ldap-admin-key.pem" \
+  -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin
+for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/master 2>/dev/null && { echo "ready after ${i}s"; break; }; sleep 1; done
+```
+
+If SASL EXTERNAL is not needed, omit the `--spi-keystore-default-ldap-*` options.
+
+Keycloak SPI options for LDAP client credentials (from [release notes](https://github.com/Nordix/keycloak/releases/tag/26.6.4-nordix-1)):
+```
+--spi-keystore-default-ldap-certificate-file=PEM_FILE
+--spi-keystore-default-ldap-certificate-key-file=KEY_PEM_FILE
+```
+Or with keystore:
+```
+--spi-keystore-default-ldap-keystore-file=KEYSTORE_FILE
+--spi-keystore-default-ldap-keystore-password=PASSWORD
+```
+
+### Step 5: Create LDAP Federation
+
+Get admin token:
+```bash
+ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
+  -d "username=admin&password=admin&grant_type=password&client_id=admin-cli" | jq -r .access_token)
+```
+
+#### Simple Bind (no StartTLS, no pooling)
+
+```bash
+curl -s -X POST http://localhost:8080/admin/realms/master/components \
+  -H "Authorization: bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d '{
+  "name": "ldap", "providerId": "ldap",
+  "providerType": "org.keycloak.storage.UserStorageProvider",
+  "config": {
+    "connectionUrl": ["ldap://localhost:389"],
+    "usersDn": ["ou=users,o=example"],
+    "bindDn": ["cn=ldap-admin,ou=users,o=example"],
+    "bindCredential": ["ldap-admin"],
+    "authType": ["simple"],
+    "editMode": ["WRITABLE"], "vendor": ["other"],
+    "usernameLDAPAttribute": ["uid"], "rdnLDAPAttribute": ["uid"],
+    "uuidLDAPAttribute": ["entryUUID"],
+    "userObjectClasses": ["inetOrgPerson, organizationalPerson"],
+    "importEnabled": ["true"], "syncRegistrations": ["true"],
+    "connectionPooling": ["false"]
+  }
+}'
+```
+
+#### Updating Existing Federation
+
+To change settings (e.g., enable StartTLS or pooling), GET the component, modify config, PUT back:
+
+```bash
+COMP_ID=$(curl -s "http://localhost:8080/admin/realms/master/components?type=org.keycloak.storage.UserStorageProvider" \
+  -H "Authorization: bearer $ADMIN_TOKEN" | jq -r '.[0].id')
+
+COMPONENT=$(curl -s "http://localhost:8080/admin/realms/master/components/$COMP_ID" \
+  -H "Authorization: bearer $ADMIN_TOKEN")
+
+echo "$COMPONENT" | jq '.config.startTls = ["true"] | .config.useTruststoreSpi = ["always"]' | \
+  curl -s -X PUT "http://localhost:8080/admin/realms/master/components/$COMP_ID" \
+  -H "Authorization: bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d @-
+```
+
+Key config fields to toggle:
+- `startTls`: `["true"]` or `["false"]`
+- `connectionPooling`: `["true"]` or `["false"]`
+- `authType`: `["simple"]` or `["EXTERNAL"]`
+- `useTruststoreSpi`: `["always"]` (needed for StartTLS and SASL EXTERNAL)
+
+For SASL EXTERNAL: set `authType` to `["EXTERNAL"]`, `startTls` to `["true"]`, `useTruststoreSpi` to `["always"]`. Remove `bindDn` and `bindCredential` (not used).
+
+### Step 6: Test Login
+
+```bash
+curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
+  -d "username=user1&password=user1&grant_type=password&client_id=admin-cli" | jq '{access_token: .access_token[:50], error, error_description}'
+```
+
+### Cleanup
+
+```bash
+runagent delete keycloak --force
+runagent delete tshark --force
+runagent delete openldap --force
+docker compose -f $HOME/work/devenvs/keycloak/docker-compose.yaml down
+```
+
 ## References
 
 - [Nordix Keycloak Repository](https://github.com/Nordix/keycloak)
