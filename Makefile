@@ -13,10 +13,10 @@ install:
 	@echo "Installing agent skills..."
 
 	# Antigravity CLI skills
-	@mkdir -p "$(HOME)/.gemini"
-	@rm -rf "$(HOME)/.gemini/skills"
-	@ln -sfn "$(PWD)/skills" "$(HOME)/.gemini/skills"
-	@echo "Linked skills to $(HOME)/.gemini/skills"
+	@mkdir -p "$(HOME)/.gemini/config"
+	@rm -rf "$(HOME)/.gemini/config/skills"
+	@ln -sfn "$(PWD)/skills" "$(HOME)/.gemini/config/skills"
+	@echo "Linked skills to $(HOME)/.gemini/config/skills"
 
 	# Copilot prompts and instructions
 	@mkdir -p "$(PROMPTS_DIR)"
