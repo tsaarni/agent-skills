@@ -248,3 +248,11 @@ See source code for more details
 
 - Local copy `~/work/echoserver/`
 - GitHub https://github.com/tsaarni/echoserver
+
+
+### How to create reproduction scripts
+
+See following examples and the scripts included on how to create good standalone bug reproduction scripts when user wants to show the bug to others
+
+- https://github.com/envoyproxy/envoy/issues/46774
+- https://gist.github.com/tsaarni/442dc84dc4824f0f27828f8ac8b931e3

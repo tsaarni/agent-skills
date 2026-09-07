@@ -153,3 +153,10 @@ See source code for more details
 cd website
 make          # serves at http://localhost:3000/openbao
 ```
+
+### How to create reproduction scripts
+
+See following examples and the scripts included on how to create good standalone bug reproduction scripts when user wants to show the bug to others
+
+
+https://github.com/hashicorp/vault/issues/32099
