@@ -21,8 +21,11 @@ Persistent, compounding memory. Capture once, update in place, never re-derive.
 ```
 ~/.agents/memory/
 ├── log.md
-└── records/
-    └── <Name>.md
+├── records/
+│   └── <Name>.md
+└── attachments/
+    └── <Name>/
+        └── <file>
 ```
 
 ## log.md
@@ -60,6 +63,27 @@ updated: 2026-07-27
 ```
 
 Content is markdown but otherwise there isn't any expectations or conventions for the formatting of content.
+
+## Attachments
+
+Store non-text or supplementary files in `attachments/<RecordName>/`. The directory name matches the record filename without `.md`.
+
+Examples:
+- `attachments/ContourHotRestart/flamegraph.svg`
+- `attachments/KeycloakEventSystem/admin-console-error.png`
+- `attachments/KeycloakEventSystem/event-listener-config.yaml`
+- `attachments/OpenBaoRaftJoin/reproduce-race.sh`
+
+Reference from records using relative markdown links:
+```markdown
+![error screenshot](../attachments/KeycloakEventSystem/admin-console-error.png)
+[config](../attachments/KeycloakEventSystem/event-listener-config.yaml)
+```
+
+Rules:
+- Create the attachment directory only when needed, not preemptively
+- When deleting a record, also delete its attachment directory
+- When renaming a record, also rename its attachment directory
 
 ## Tags
 
@@ -99,9 +123,9 @@ rg "^2026-07" log.md
 
 ## Write discipline
 
-Every modification to records requires a log entry. No exceptions.
+Every modification to records or attachments requires a log entry. No exceptions.
 
-1. Write/update/delete/rename the record
+1. Write/update/delete/rename the record (and its attachments if applicable)
 2. Append to `log.md`
 
 Log entry examples:
@@ -110,4 +134,5 @@ Log entry examples:
 2026-07-28T10:00 | contour | Updated with fix verification | ContourHotRestart.md
 2026-08-01T16:45 | contour | Deleted, no longer relevant | ContourHotRestart.md
 2026-08-01T16:45 | contour | Renamed from ContourHotReload.md | ContourHotRestart.md
+2026-08-02T11:20 | contour | Added flamegraph attachment | ContourHotRestart.md
 ```
