@@ -615,36 +615,64 @@ export default async function (pi: ExtensionAPI) {
       }
 
       const rollingTokens = tokenQueue.reduce((sum, r) => sum + r.tokens, 0);
-      const estimated = ctx.getContextUsage()?.tokens ?? (tokenQueue.at(-1)?.tokens ?? 100_000);
+      const usageTokens = ctx.getContextUsage()?.tokens;
+      const estimated =
+        usageTokens && usageTokens > 0
+          ? usageTokens
+          : (tokenQueue.at(-1)?.tokens ?? 100_000);
 
       if (rollingTokens + estimated <= ceiling) {
         return;
       }
 
-      // Find the record whose expiry brings the projected token count below ceiling
+      // Determine recovery target: aim to leave headroom (at least one extra turn's
+      // worth of tokens, up to 25% of ceiling) so we don't immediately stutter again
+      // on the very next turn.
+      const headroom = Math.min(estimated, ceiling * 0.25);
+      const targetCeiling = Math.max(estimated, ceiling - headroom);
+
       let projected = rollingTokens + estimated;
       let targetExpiry = now;
+      let bestExpiry = now;
+
       for (const record of tokenQueue) {
         projected -= record.tokens;
-        if (projected <= ceiling) {
-          targetExpiry = record.timestamp + windowMs + 1000; // 1s buffer
+        // First record that gets projected under the ceiling
+        if (projected <= ceiling && bestExpiry === now) {
+          bestExpiry = record.timestamp + windowMs + 1000;
+        }
+        // Record that reaches our target with headroom
+        if (projected <= targetCeiling) {
+          targetExpiry = record.timestamp + windowMs + 1000;
           break;
         }
+      }
+
+      // If targetCeiling couldn't be reached with the records in the queue,
+      // fall back to bestExpiry (or wait for the entire queue to clear)
+      if (targetExpiry === now) {
+        targetExpiry =
+          bestExpiry !== now
+            ? bestExpiry
+            : (tokenQueue.at(-1)?.timestamp ?? now) + windowMs + 1000;
       }
 
       const waitMs = targetExpiry - Date.now();
       if (waitMs <= 0) return;
 
-      // Real live countdown in Pi footer
+      // Real live countdown in Pi footer (only show when wait is noticeable to avoid flicker)
       const endTime = Date.now() + waitMs;
       while (Date.now() < endTime) {
         if (ctx.signal?.aborted) break;
-        const remainingSec = Math.max(1, Math.ceil((endTime - Date.now()) / 1000));
-        ctx.ui.setStatus(
-          "gemini-pacer",
-          `⏳ Pacing Gemini (${remainingSec}s to clear 2M TPM window)...`,
-        );
-        const chunk = Math.min(1000, endTime - Date.now());
+        const remainingMs = endTime - Date.now();
+        if (remainingMs >= 300) {
+          const remainingSec = Math.max(1, Math.ceil(remainingMs / 1000));
+          ctx.ui.setStatus(
+            "gemini-pacer",
+            `⏳ Pacing Gemini (${remainingSec}s to clear 2M TPM window)...`,
+          );
+        }
+        const chunk = Math.min(1000, remainingMs);
         try {
           await sleep(chunk, ctx.signal);
         } catch {
@@ -653,6 +681,12 @@ export default async function (pi: ExtensionAPI) {
       }
 
       ctx.ui.setStatus("gemini-pacer", undefined);
+
+      // Prune records that expired during the wait
+      const afterWait = Date.now();
+      while (tokenQueue.length > 0 && afterWait - tokenQueue[0].timestamp > windowMs) {
+        tokenQueue.shift();
+      }
     });
 
     // Clear pacer status at the end of each turn
