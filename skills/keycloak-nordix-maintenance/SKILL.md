@@ -348,7 +348,7 @@ mvn clean install -DskipTestsuite -DskipExamples -DskipTests
 
 Start with truststore and LDAP client cert (for SASL EXTERNAL):
 ```bash
-runagent delete keycloak --force >/dev/null 2>&1
+runagent delete keycloak >/dev/null 2>&1
 runagent run -n keycloak -- mvn -f quarkus/server/pom.xml compile quarkus:dev \
   -Dkc.config.built=true \
   "-Dquarkus.args=start-dev --db=dev-mem \
@@ -438,9 +438,9 @@ curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/toke
 ### Cleanup
 
 ```bash
-runagent delete keycloak --force
-runagent delete tshark --force
-runagent delete openldap --force
+runagent delete keycloak
+runagent delete tshark
+runagent delete openldap
 docker compose -f $HOME/work/devenvs/keycloak/docker-compose.yaml down
 ```
 

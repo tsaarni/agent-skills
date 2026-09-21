@@ -13,14 +13,20 @@ description: Development environment, building, debugging, testing, Kubernetes d
 - Infer names and IDs from the context when possible. For example, if a realm name is required and there is only one realm, infer that realm name. If there are multiple realms, ask for clarification or use `master` as default.
 - Use `http://keycloak.127-0-0-1.nip.io:8080` as the default base URL for API requests if the user has not specified a different URL for Keycloak.
 - Replace `<ADMIN_TOKEN>` with the actual token value obtained from the token endpoint using command `$(curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/master/protocol/openid-connect/token -d 'username=admin&password=admin&grant_type=password&client_id=admin-cli' | jq -r .access_token)`.
+- Maven/mvnd builds produce huge output. Always use `-l <logfile>` to redirect build output to a file, then `tail` the log to check the result:
+  ```bash
+  mvnd -l /tmp/build.log clean install ...; tail -20 /tmp/build.log  # success: tail -20, failure: tail -80
+  ```
 
 ## Building Keycloak
 
 ### Full Build
 ```bash
-mvnd clean install -DskipTestsuite -DskipExamples -DskipTests # Parallel build with mvnd (faster)
-mvn clean install -DskipTestsuite -DskipExamples -DskipTests # Regular maven build (slower but use if you have issues with mvnd)
+mvnd -l /tmp/kc-build.log clean install -DskipTestsuite -DskipExamples -Dmaven.test.skip=true; tail -20 /tmp/kc-build.log # Parallel build with mvnd (faster)
+mvn -l /tmp/kc-build.log clean install -DskipTestsuite -DskipExamples -Dmaven.test.skip=true; tail -20 /tmp/kc-build.log # Regular maven build (slower but use if you have issues with mvnd)
 ```
+
+Always use `-Dmaven.test.skip=true`, not `-DskipTests`. `-DskipTests` still compiles tests — if test compilation fails, the module never reaches `install`, leaving stale jars in `~/.m2` that break downstream Quarkus augmentation.
 
 Note: `clean` wipes `quarkus/server/target/kc/data/` which contains:
 - `h2/` — H2 database files (when using `--db=dev-file` or default)
@@ -46,7 +52,7 @@ Examples:
 
 ### Development Mode
 ```bash
-runagent delete keycloak --force >/dev/null 2>&1
+runagent delete keycloak >/dev/null 2>&1
 runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
   -Dkc.config.built=true -Dquarkus.args="start-dev --db=dev-mem" \
   -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin
@@ -55,7 +61,7 @@ for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/
 
 With PostgreSQL (requires running docker compose with PostgreSQL container):
 ```bash
-runagent delete keycloak --force >/dev/null 2>&1
+runagent delete keycloak >/dev/null 2>&1
 runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
   -Dkc.config.built=true \
   -Dquarkus.args="start-dev -Dkc.db=postgres -Dkc.db-url=jdbc:postgresql://localhost/keycloak -Dkc.db-username=keycloak -Dkc.db-password=keycloak" \
@@ -65,7 +71,7 @@ for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/
 
 ### Per-Category Debug Logging
 ```bash
-runagent delete keycloak --force >/dev/null 2>&1
+runagent delete keycloak >/dev/null 2>&1
 runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
   -Dkc.config.built=true \
   '-Dquarkus.args=start-dev --db=dev-mem --log-level=org.keycloak.services.resources.admin.AdminRoot:debug,org.keycloak.services.managers.AuthenticationManager:debug' \
@@ -148,16 +154,16 @@ EOF
 ### Running Unit Tests
 ```bash
 # Build first
-mvn clean install -DskipTests
-(cd distribution; mvn clean install)
+mvn -l /tmp/kc-build.log clean install -DskipTests; tail -20 /tmp/kc-build.log
+(cd distribution; mvn -l /tmp/kc-dist-build.log clean install; tail -20 /tmp/kc-dist-build.log)
 
 # Run specific test
-mvn clean install -Pauth-server-quarkus-f testsuite/integration-arquillian/pom.xml \
+mvn -l /tmp/kc-test.log clean install -Pauth-server-quarkus-f testsuite/integration-arquillian/pom.xml \
   -Dtest=org.keycloak.testsuite.federation.storage.UserStorageDirtyDeletionUnsyncedImportTest#testMembersWhenCachedUsersRemovedFromBackend \
-  -Dkeycloak.logging.level=debug
+  -Dkeycloak.logging.level=debug; tail -20 /tmp/kc-test.log
 
 # Run all tests in package (recursively)
-mvn clean install -Pauth-server-quarkus -Dtest=org.keycloak.testsuite.federation.ldap.** -Dkeycloak.logging.level=debug
+mvn -l /tmp/kc-test.log clean install -Pauth-server-quarkus -Dtest=org.keycloak.testsuite.federation.ldap.** -Dkeycloak.logging.level=debug; tail -20 /tmp/kc-test.log
 ```
 
 ### New JUnit5 Test Framework
@@ -173,8 +179,8 @@ KC_TEST_LOG_CATEGORY__ORG_APACHE_HTTP__LEVEL=DEBUG
 EOF
 
 # Run tests
-mvn -f tests/pom.xml test -Dtest=SMTPConnectionVaultTest
-mvn -f tests/pom.xml test -Dtest=ClientVaultTest
+mvn -l /tmp/kc-test.log -f tests/pom.xml test -Dtest=SMTPConnectionVaultTest; tail -20 /tmp/kc-test.log
+mvn -l /tmp/kc-test.log -f tests/pom.xml test -Dtest=ClientVaultTest; tail -20 /tmp/kc-test.log
 ```
 
 ## Database Management
@@ -962,7 +968,7 @@ sudo nsenter --target $(pgrep -f quarkus) --net wireshark -f "port 8080" -Y http
 
 ### Build Documentation
 ```bash
-./mvnw clean install -am -pl docs/documentation/dist -Pdocumentation
+./mvnw -l /tmp/kc-docs.log clean install -am -pl docs/documentation/dist -Pdocumentation; tail -20 /tmp/kc-docs.log
 kde-open ./docs/documentation/server_admin/target/generated-docs/index.html
 ```
 
