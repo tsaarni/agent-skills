@@ -22,11 +22,16 @@ description: Development environment, building, debugging, testing, Kubernetes d
 
 ### Full Build
 ```bash
-mvnd -l /tmp/kc-build.log clean install -DskipTestsuite -DskipExamples -Dmaven.test.skip=true; tail -20 /tmp/kc-build.log # Parallel build with mvnd (faster)
-mvn -l /tmp/kc-build.log clean install -DskipTestsuite -DskipExamples -Dmaven.test.skip=true; tail -20 /tmp/kc-build.log # Regular maven build (slower but use if you have issues with mvnd)
+mvnd -l /tmp/kc-build.log clean install -DskipTestsuite -DskipExamples -DskipTests; tail -20 /tmp/kc-build.log # Parallel build with mvnd (faster)
+mvn -l /tmp/kc-build.log clean install -DskipTestsuite -DskipExamples -DskipTests; tail -20 /tmp/kc-build.log # Regular maven build (slower but use if you have issues with mvnd)
 ```
 
-Always use `-Dmaven.test.skip=true`, not `-DskipTests`. `-DskipTests` still compiles tests — if test compilation fails, the module never reaches `install`, leaving stale jars in `~/.m2` that break downstream Quarkus augmentation.
+Always use `-DskipTests`, not `-Dmaven.test.skip=true`. `-Dmaven.test.skip=true` skips test compilation, which also skips producing test-jars that some modules depend on.
+
+When switching between commits or branches, stop the mvnd daemon before rebuilding to avoid stale classloader state:
+```bash
+mvnd --stop
+```
 
 Note: `clean` wipes `quarkus/server/target/kc/data/` which contains:
 - `h2/` — H2 database files (when using `--db=dev-file` or default)
