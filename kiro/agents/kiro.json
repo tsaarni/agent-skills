@@ -3,6 +3,9 @@
   "description": "generic agent",
   "prompt": "You are a general-purpose assistant helping with coding, analysis, writing, and problem-solving.\n\n## Audience\n- The user is an experienced programmer.\n- Do not assume prior knowledge of the specific subject or domain being discussed. Match explanations to a technical background without skipping domain-specific context.\n\n## Communication Style\n- Respond in clear, simple, and direct language.\n- Avoid unnecessary commentary, hyperbole, metaphors, analogies, or performative enthusiasm.\n- Keep explanations concise and factual.\n\n## Tool Rules\n- When invoking subagents via the `use_subagent` tool, you MUST explicitly set `agent_name` to \"kiro\". Never omit `agent_name`.",
   "tools": [
+    "@chrome-devtools/*",
+    "@github/*",
+    "@mcpuppet/*",
     "code",
     "glob",
     "goal",
@@ -13,9 +16,7 @@
     "subagent",
     "todo_list",
     "use_aws",
-    "write",
-    "@github/*",
-    "@mcpuppet/*"
+    "write"
   ],
   "toolAliases": {},
   "allowedTools": [
@@ -32,11 +33,14 @@
     "@github/search_*",
     "@github/pull_request_read",
     "@github/issue_read",
-    "@mcpuppet/*"
+    "@mcpuppet/*",
+    "@chrome-devtools/*"
   ],
   "toolsSettings": {
     "fs_read": {
-      "allowedPaths": ["./**"]
+      "allowedPaths": [
+        "./**"
+      ]
     },
     "shell": {
       "deniedCommands": [
@@ -88,7 +92,7 @@
     "skill://~/.kiro/skills/**/SKILL.md",
     "skill://.kiro/skills/**/SKILL.md"
   ],
-  "hooks": {},
+  "hooks": [],
   "model": null,
   "mcpServers": {
     "github": {
@@ -98,18 +102,95 @@
       },
       "disabled": false
     },
-    "chrome-devtools": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "chrome-devtools-mcp@latest",
-        "--browserUrl=http://127.0.0.1:9222"
-      ],
-      "disabled": true
-    },
     "mcpuppet": {
       "url": "http://127.0.0.1:5420/mcp",
       "disabled": false
+    },
+    "chrome-devtools": {
+      "url": "http://127.0.0.1:5420/devtools-mcp",
+      "disabled": false
     }
+  },
+  "permissions": {
+    "rules": [
+      {
+        "capability": "shell",
+        "match": [
+          "gh issue list *",
+          "gh issue view *",
+          "gh pr checks *",
+          "gh pr list *",
+          "gh pr view *",
+          "gh pr diff *",
+          "gh repo view *",
+          "gh release list *",
+          "gh release view *",
+          "gh run list *",
+          "gh run view *",
+          "gh search *",
+          "git status*",
+          "git log*",
+          "git show*",
+          "git diff*",
+          "git branch*",
+          "git remote*",
+          "git ls-files*",
+          "git ls-remote*",
+          "git describe*",
+          "git tag -l*",
+          "git rev-parse*",
+          "git merge-base*",
+          "ls",
+          "cat",
+          "echo",
+          "sort",
+          "test",
+          "grep",
+          "wc",
+          "sed -n *",
+          "jq *"
+        ],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": [
+          "*sed *-i*",
+          "*sed *--in-place*"
+        ],
+        "effect": "deny"
+      },
+      {
+        "capability": "fs_read",
+        "match": [
+          "./**"
+        ],
+        "effect": "allow"
+      },
+      {
+        "capability": "fs_read",
+        "effect": "allow"
+      },
+      {
+        "capability": "subagent",
+        "effect": "allow"
+      },
+      {
+        "capability": "mcp",
+        "match": [
+          "chrome-devtools/*",
+          "github/get_*",
+          "github/issue_read",
+          "github/list_*",
+          "github/pull_request_read",
+          "github/search_*",
+          "mcpuppet/*"
+        ],
+        "effect": "allow"
+      }
+    ],
+    "policies": [
+      "read-only-shell"
+    ]
   }
 }
