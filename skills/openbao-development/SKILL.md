@@ -160,3 +160,110 @@ See following examples and the scripts included on how to create good standalone
 
 
 https://github.com/hashicorp/vault/issues/32099
+
+
+## Run on Kubernetes (Kind)
+
+Run locally-built bao binary inside Kind cluster without building a container image. Uses a placeholder pod that mounts the source directory from host.
+
+Create Kind cluster with host mount:
+
+```bash
+cat <<EOF | kind create cluster --config - --name openbao
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraMounts:
+  - hostPath: $(pwd)
+    containerPath: /openbao
+EOF
+kind get kubeconfig --name openbao > /tmp/openbao-kubeconfig.yaml
+export KUBECONFIG=/tmp/openbao-kubeconfig.yaml
+```
+
+Deploy placeholder pod:
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: openbao
+spec:
+  containers:
+  - name: openbao
+    image: docker.io/library/ubuntu:24.04
+    command: ["sleep", "infinity"]
+    workingDir: /openbao
+    volumeMounts:
+    - name: openbao-src
+      mountPath: /openbao
+    env:
+    - name: BAO_ADDR
+      value: "http://127.0.0.1:8200"
+  volumes:
+  - name: openbao-src
+    hostPath:
+      path: /openbao
+      type: Directory
+EOF
+kubectl wait --for=condition=ready pod/openbao --timeout=120s
+```
+
+Run bao inside the pod:
+
+```bash
+kubectl exec -it openbao -- /openbao/bin/bao server -dev -dev-root-token-id=root
+# In another terminal:
+kubectl exec -it openbao -- bash
+/openbao/bin/bao login root
+```
+
+Rebuild on host (`go build -o bin/bao .`) — binary is immediately available in the pod via the mount, no restart needed.
+
+### Kubernetes auth method
+
+Uses Kubernetes TokenReview API to validate service account tokens. Requires RBAC for bao's service account:
+
+```bash
+kubectl create clusterrolebinding openbao-token-review \
+  --clusterrole=system:auth-delegator \
+  --serviceaccount=default:default
+```
+
+Enable and configure:
+
+```bash
+bao auth enable kubernetes
+bao write auth/kubernetes/config kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+```
+
+Create role and login:
+
+```bash
+bao write auth/kubernetes/role/my-role \
+  bound_service_account_names=default \
+  bound_service_account_namespaces=default \
+  policies=default ttl=1h
+
+bao write auth/kubernetes/login role=my-role \
+  jwt=@/var/run/secrets/kubernetes.io/serviceaccount/token
+```
+
+To use a dedicated service account for bao, create one and set `serviceAccountName` in the pod spec.
+
+### JWT auth with Kubernetes as OIDC provider
+
+Alternative to Kubernetes auth method. Validates service account tokens using public key cryptography via JWKS. 
+
+```bash
+bao auth enable jwt
+bao write auth/jwt/config provider_config='{"provider":"kubernetes"}'
+```
+
+### Cleanup
+
+```bash
+kind delete cluster --name openbao
+```
