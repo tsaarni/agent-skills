@@ -188,6 +188,19 @@ mvn -l /tmp/kc-test.log -f tests/pom.xml test -Dtest=SMTPConnectionVaultTest; ta
 mvn -l /tmp/kc-test.log -f tests/pom.xml test -Dtest=ClientVaultTest; tail -20 /tmp/kc-test.log
 ```
 
+## Linting / Formatting
+
+Java formatting is checked with Spotless:
+```bash
+./mvnw -Pdocs,distribution,operator spotless:check   # Check formatting
+./mvnw spotless:apply                                 # Auto-fix formatting
+```
+
+JavaScript linting (from `js/` directory):
+```bash
+pnpm lint
+```
+
 ## Database Management
 
 ### H2 Database
