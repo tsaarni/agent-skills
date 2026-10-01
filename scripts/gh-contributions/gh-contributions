@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""
+Fetch GitHub contributions using the `gh` CLI, grouped by repository, type, and state.
+
+Queries:
+  authored   - Issues and PRs created by the user
+  reviewed   - PRs reviewed by the user (excluding own)
+  involved   - Issues and PRs the user participated in (excluding authored)
+
+Requires: gh CLI (authenticated)
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+
+
+# ---------------------------------------------------------------------------
+# Period parsing
+# ---------------------------------------------------------------------------
+
+def parse_period(value):
+    """Parse a period string into (since, until) date strings.
+
+    Supported formats:
+        YYYY-MM-DD..YYYY-MM-DD   explicit range
+        YYYY-MM-DD..             since date to now
+        YYYY                     full year
+        YYYY-MM                  full month
+        YYYY-qN or qN            quarter (qN alone uses current year)
+        last-N-days              rolling window
+    """
+    today = date.today()
+
+    # Explicit range: 2026-01-01..2026-06-30 or 2026-01-01..
+    if ".." in value:
+        parts = value.split("..", 1)
+        since = parts[0]
+        until = parts[1] if parts[1] else None
+        return since, until
+
+    # Quarter: q3, Q3, 2026-q3, 2026-Q3
+    m = re.fullmatch(r"(?:(\d{4})-)?[qQ]([1-4])", value)
+    if m:
+        year = int(m.group(1)) if m.group(1) else today.year
+        q = int(m.group(2))
+        first_month = (q - 1) * 3 + 1
+        since = date(year, first_month, 1)
+        if q < 4:
+            until = date(year, first_month + 3, 1) - timedelta(days=1)
+        else:
+            until = date(year, 12, 31)
+        return str(since), str(until)
+
+    # Year: 2026
+    if re.fullmatch(r"\d{4}", value):
+        return f"{value}-01-01", f"{value}-12-31"
+
+    # Month: 2026-09
+    if re.fullmatch(r"\d{4}-\d{2}", value):
+        y, m_val = value.split("-")
+        since = date(int(y), int(m_val), 1)
+        if int(m_val) == 12:
+            until = date(int(y), 12, 31)
+        else:
+            until = date(int(y), int(m_val) + 1, 1) - timedelta(days=1)
+        return str(since), str(until)
+
+    # Rolling: last-30-days, last-7-days
+    m = re.fullmatch(r"last-(\d+)-days", value)
+    if m:
+        days = int(m.group(1))
+        since = today - timedelta(days=days)
+        return str(since), None
+
+    # Explicit date
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return value, None
+
+    print(f"error: unrecognized period format: {value}", file=sys.stderr)
+    print("Run with --help to see supported formats.", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# GitHub CLI wrapper
+# ---------------------------------------------------------------------------
+
+def gh_search(kind, flags, fields, limit=200, qualifiers=None):
+    """Run `gh search <kind>` and return parsed JSON."""
+    cmd = [
+        "gh", "search", kind,
+        *flags,
+        f"--limit={limit}",
+        f"--json={','.join(fields)}",
+    ]
+    if qualifiers:
+        cmd.extend(["--", *qualifiers])
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"error: gh search {kind} failed: {result.stderr.strip()}", file=sys.stderr)
+        return []
+    if not result.stdout.strip():
+        return []
+    return json.loads(result.stdout)
+
+
+# ---------------------------------------------------------------------------
+# Contribution fetching
+# ---------------------------------------------------------------------------
+
+FIELDS = ["repository", "state", "title", "url", "number", "createdAt", "closedAt"]
+
+
+def date_range_flag(since, until):
+    if until:
+        return f"{since}..{until}"
+    return f">={since}"
+
+
+def fetch_authored(author, created, limit, repo=None):
+    items = []
+    repo_flag = [f"--repo={repo}"] if repo else []
+    for kind, ctype in [("issues", "issue"), ("prs", "pr")]:
+        results = gh_search(kind, [f"--author={author}", f"--created={created}"] + repo_flag, FIELDS, limit)
+        for r in results:
+            r["contribution"] = ctype
+            r["role"] = "author"
+        items.extend(results)
+    return items
+
+
+def fetch_reviewed(author, created, limit, repo=None):
+    repo_flag = [f"--repo={repo}"] if repo else []
+    results = gh_search(
+        "prs",
+        [f"--reviewed-by={author}", f"--created={created}"] + repo_flag,
+        FIELDS, limit,
+        qualifiers=[f"-author:{author}"],
+    )
+    for r in results:
+        r["contribution"] = "pr"
+        r["role"] = "reviewer"
+    return results
+
+
+def fetch_involved(author, created, limit, repo=None):
+    items = []
+    repo_flag = [f"--repo={repo}"] if repo else []
+    for kind, ctype in [("issues", "issue"), ("prs", "pr")]:
+        results = gh_search(
+            kind,
+            [f"--involves={author}", f"--created={created}"] + repo_flag,
+            FIELDS, limit,
+            qualifiers=[f"-author:{author}"],
+        )
+        for r in results:
+            r["contribution"] = ctype
+            r["role"] = "involved"
+        items.extend(results)
+    return items
+
+
+def fetch_all(author, since, until, limit, repo=None):
+    created = date_range_flag(since, until)
+    items = []
+
+    print("Fetching authored issues and PRs...", file=sys.stderr)
+    items.extend(fetch_authored(author, created, limit, repo))
+
+    print("Fetching reviewed PRs...", file=sys.stderr)
+    items.extend(fetch_reviewed(author, created, limit, repo))
+
+    print("Fetching involved issues and PRs...", file=sys.stderr)
+    items.extend(fetch_involved(author, created, limit, repo))
+
+    # Deduplicate: involved overlaps with authored and reviewed.
+    # Keep the more specific role: author > reviewer > involved.
+    seen_urls = {}  # url -> role
+    unique = []
+    role_priority = {"author": 0, "reviewer": 1, "involved": 2}
+    for item in items:
+        url = item.get("url")
+        role = item.get("role")
+        prev = seen_urls.get(url)
+        if prev is None:
+            seen_urls[url] = role
+            unique.append(item)
+        elif role_priority.get(role, 99) < role_priority.get(prev, 99):
+            # Replace with higher-priority role (shouldn't happen given fetch order, but safe)
+            unique = [i for i in unique if i.get("url") != url]
+            unique.append(item)
+            seen_urls[url] = role
+        # else: skip duplicate with lower priority
+
+    return unique
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+def repo_name(item):
+    return item.get("repository", {}).get("nameWithOwner", "unknown")
+
+
+def format_date(iso_str):
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
+    except (ValueError, AttributeError):
+        return iso_str[:10] if iso_str else ""
+
+
+def output_json(items):
+    out = []
+    for item in items:
+        entry = dict(item)
+        entry["repo"] = repo_name(entry)
+        entry.pop("repository", None)
+        # Normalize Go zero-time to null
+        if entry.get("closedAt", "").startswith("0001-"):
+            entry["closedAt"] = None
+        out.append(entry)
+    json.dump(out, sys.stdout, indent=2)
+    print()
+
+
+def output_text(items):
+    grouped = defaultdict(lambda: defaultdict(list))
+    for item in items:
+        repo = repo_name(item)
+        key = (item["role"], item["contribution"])
+        grouped[repo][key].append(item)
+
+    section_order = [
+        ("author", "pr"), ("author", "issue"),
+        ("reviewer", "pr"),
+        ("involved", "pr"), ("involved", "issue"),
+    ]
+    section_labels = {
+        ("author", "pr"): "Authored PRs",
+        ("author", "issue"): "Authored Issues",
+        ("reviewer", "pr"): "Reviewed PRs",
+        ("involved", "pr"): "Involved PRs",
+        ("involved", "issue"): "Involved Issues",
+    }
+    state_order = {"open": 0, "merged": 1, "closed": 2}
+
+    # Summary
+    by_role = defaultdict(int)
+    by_state = defaultdict(int)
+    for item in items:
+        by_role[item["role"]] += 1
+        by_state[item.get("state", "unknown").lower()] += 1
+
+    print(f"Total: {len(items)}  "
+          f"(authored: {by_role['author']}, reviewed: {by_role['reviewer']}, involved: {by_role['involved']})")
+    print(f"State: open: {by_state.get('open', 0)}, merged: {by_state.get('merged', 0)}, closed: {by_state.get('closed', 0)}")
+    print()
+
+    for repo in sorted(grouped.keys()):
+        sections = grouped[repo]
+        repo_total = sum(len(v) for v in sections.values())
+        print(f"{'=' * 78}")
+        print(f"  {repo} ({repo_total})")
+        print(f"{'=' * 78}")
+
+        for key in section_order:
+            if key not in sections:
+                continue
+            section_items = sorted(
+                sections[key],
+                key=lambda x: (state_order.get(x.get("state", "").lower(), 99), x.get("createdAt", "")),
+            )
+            print(f"\n  {section_labels[key]} ({len(section_items)})")
+            print(f"  {'-' * 38}")
+
+            for item in section_items:
+                state = item.get("state", "?").upper()
+                number = item.get("number", "")
+                title = item.get("title", "")
+                created = format_date(item.get("createdAt"))
+                if len(title) > 52:
+                    title = title[:51] + "…"
+                print(f"    {state:<7} #{number:<6} {created}  {title}")
+
+        print()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Fetch GitHub contributions grouped by repository, type, and state.",
+        epilog="""period formats:
+  YYYY-MM-DD..YYYY-MM-DD   explicit range
+  YYYY-MM-DD..             since date to now
+  YYYY                     full year
+  YYYY-MM                  full month
+  q1..q4 or YYYY-q1..q4   quarter
+  last-N-days              rolling window""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--period", default="last-365-days",
+                        help="time period (default: last-365-days)")
+    parser.add_argument("--author", default="@me",
+                        help="GitHub username (default: @me)")
+    parser.add_argument("--repo", default=None,
+                        help="filter to a specific repository (owner/repo)")
+    parser.add_argument("--limit", type=int, default=200,
+                        help="max results per query (default: 200, max: 1000)")
+    parser.add_argument("--format", choices=["text", "json"], default=None,
+                        help="output format (default: json when piped, text when interactive)")
+    args = parser.parse_args()
+
+    since, until = parse_period(args.period)
+    print(f"Period: {since} .. {until or 'now'}", file=sys.stderr)
+
+    items = fetch_all(args.author, since, until, args.limit, args.repo)
+
+    if not items:
+        print("No contributions found.", file=sys.stderr)
+        sys.exit(0)
+
+    fmt = args.format
+    if fmt is None:
+        fmt = "text" if sys.stdout.isatty() else "json"
+
+    if fmt == "json":
+        output_json(items)
+    else:
+        output_text(items)
+
+
+if __name__ == "__main__":
+    main()
