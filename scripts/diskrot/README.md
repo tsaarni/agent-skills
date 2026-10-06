@@ -1,6 +1,6 @@
 # diskrot
 
-Find large directories that haven't been accessed recently. Parallel filesystem walker using raw `getdents64` + `lstat` syscalls.
+Find large and stale directories on disk.
 
 ## Build
 
@@ -11,25 +11,35 @@ go build -o diskrot .
 ## Usage
 
 ```bash
-./diskrot -path /home/user -depth 2 -not-accessed-days 90 -min-size 104857600
+diskrot [path] [flags]
 ```
 
-- `-path` — root directory to scan (default: `$HOME`)
-- `-depth` — aggregation depth (default: 2)
-- `-not-accessed-days` — only show dirs not accessed in this many days (default: 180)
-- `-min-size` — minimum aggregated size in bytes (default: 100 MiB)
-- `-top` — number of results (default: 40)
+Path defaults to `$HOME` if not given.
 
-## Example
+### Examples
 
-```
-$ ./diskrot -path /home/user -not-accessed-days 90 -min-size 0 -top 10
-Target: /home/user  depth=2  not-accessed=90d  cutoff=2026-07-08
-
-   952 MiB  2026-04-11   99599 files  .rbenv/versions
-   780 MiB  2025-11-01       3 files  .cache/trivy
-   605 MiB  2026-06-30       1 files  core
-   576 MiB  2026-06-30       1 files  Downloads/clang+llvm-14.0.0.tar.xz
+```bash
+diskrot ~                          # show biggest directories
+diskrot ~ --stale-days 90          # show stale content not accessed in 90 days
+diskrot ~/.cache --min-size 100MB  # focus on a specific directory
 ```
 
-Output shows: size, last access date, file count, path. Lists both directories (with aggregated totals) and individual large files. Everything listed is a removal candidate.
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--stale-days` | 0 | Show content not accessed in this many days. 0 means show all. |
+| `--min-size` | 500MB | Hide directories smaller than this. Accepts MB, GB, etc. |
+| `--top` | 20 | Number of top-level results. |
+| `--min-ratio` | 0.3 | Subdirectory must be at least this fraction of parent to be shown. |
+| `--workers` | CPU count | Parallel workers for filesystem walk. |
+
+## How it works
+
+Uses a pool of parallel workers to read directories and stat files concurrently across all CPU cores. Directory entries are read with raw Linux syscalls, skipping the overhead of Go's standard library (no sorting, no extra allocations per file). A full home directory scan with ~14 million files completes in about 5 seconds.
+
+Results are shown as a flat list with full paths. When a subdirectory holds a large fraction of its parent (controlled by `--min-ratio`), it gets its own line showing where the space concentrates.
+
+With `--stale-days`, output includes two size columns: `STALE` shows how much data in that subtree has not been accessed within the threshold, `TOTAL` shows the full size. Staleness is checked per file using atime. This works with the `relatime` mount option common on Linux.
+
+Linux only.

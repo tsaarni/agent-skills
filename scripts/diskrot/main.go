@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,132 +12,256 @@ import (
 	"unsafe"
 
 	"github.com/dustin/go-humanize"
+	"github.com/spf13/cobra"
 )
 
-type dirStats struct {
-	path       string
-	totalSize  int64
-	newestTime time.Time // atime (last access)
-	fileCount  int64
+// dirNode is a node in the directory tree with aggregated stats.
+type dirNode struct {
+	name         string
+	path         string
+	ownSize      int64     // size of files directly in this directory
+	ownFiles     int64     // count of files directly in this directory
+	ownTime      time.Time // newest atime of files directly in this directory
+	totalSize    int64     // ownSize + all descendants
+	newestTime   time.Time // newest atime across all descendants
+	fileCount    int64     // ownFiles + all descendants
+	staleSize    int64     // total size of stale content in this subtree
+	ownStaleSize int64     // size of stale files directly in this directory
+	children     []*dirNode
 }
+
+var (
+	staleDays  int
+	topN       int
+	workers    int
+	minSizeStr string
+	drillRatio float64
+)
 
 func main() {
-	target := flag.String("path", os.Getenv("HOME"), "root directory to scan")
-	depth := flag.Int("depth", 2, "aggregation depth relative to root")
-	staleDays := flag.Int("not-accessed-days", 180, "mark directories not accessed in this many days")
-	topN := flag.Int("top", 40, "number of results to show")
-	workers := flag.Int("workers", runtime.NumCPU(), "number of parallel workers")
-	minSize := flag.Int64("min-size", 100*1024*1024, "minimum size in bytes to display (default 100MB)")
-	flag.Parse()
+	cmd := &cobra.Command{
+		Use:   "diskrot [path]",
+		Short: "Find large and stale directories",
+		Long:  "Parallel filesystem walker that shows where disk space is used, with auto drill-down into dominant subdirectories.",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  run,
+	}
+	cmd.Flags().IntVar(&staleDays, "stale-days", 0, "only show directories not accessed in this many days (0 = show all)")
+	cmd.Flags().IntVar(&topN, "top", 20, "number of top-level results to show")
+	cmd.Flags().IntVar(&workers, "workers", runtime.NumCPU(), "number of parallel workers")
+	cmd.Flags().StringVar(&minSizeStr, "min-size", "500MB", "minimum size to display (e.g. 100MB, 1GB)")
+	cmd.Flags().Float64Var(&drillRatio, "min-ratio", 0.3, "minimum ratio of parent size to show a subdirectory")
+	cmd.SilenceUsage = true
 
-	cutoff := time.Now().AddDate(0, 0, -*staleDays)
-	abs, err := filepath.Abs(*target)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bad path: %v\n", err)
+	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
-	}
-	*target = abs
-
-	dirs := walkAndAggregate(*target, *depth, *workers)
-
-	sorted := make([]*dirStats, 0, len(dirs))
-	for _, d := range dirs {
-		if d.totalSize >= *minSize && d.newestTime.Before(cutoff) {
-			sorted = append(sorted, d)
-		}
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].totalSize > sorted[j].totalSize
-	})
-	if len(sorted) > *topN {
-		sorted = sorted[:*topN]
-	}
-
-	maxPath := 0
-	for _, d := range sorted {
-		rel, _ := filepath.Rel(*target, d.path)
-		if len(rel) > maxPath {
-			maxPath = len(rel)
-		}
-	}
-
-	fmt.Printf("Target: %s  depth=%d  not-accessed=%dd  cutoff=%s\n\n", *target, *depth, *staleDays, cutoff.Format("2006-01-02"))
-
-	for _, d := range sorted {
-		rel, _ := filepath.Rel(*target, d.path)
-		fmt.Printf("%10s  %s  %6d files  %s\n",
-			humanize.IBytes(uint64(d.totalSize)),
-			d.newestTime.Format("2006-01-02"),
-			d.fileCount,
-			rel,
-		)
 	}
 }
 
-func walkAndAggregate(target string, depth, numWorkers int) map[string]*dirStats {
+func run(cmd *cobra.Command, args []string) error {
+	target := os.Getenv("HOME")
+	if len(args) > 0 {
+		target = args[0]
+	}
+
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("bad path: %w", err)
+	}
+	target = abs
+
+	minBytesU, err := humanize.ParseBytes(minSizeStr)
+	if err != nil {
+		return fmt.Errorf("bad min-size: %w", err)
+	}
+	minBytes := int64(minBytesU)
+
+	var cutoff time.Time
+	staleMode := staleDays > 0
+	if staleMode {
+		cutoff = time.Now().AddDate(0, 0, -staleDays)
+	}
+
+	// Print scan info immediately.
+	fmt.Printf("Scanning: %s\n", target)
+	fmt.Printf("Filters:  min-size=%s  top=%d  min-ratio=%.0f%%", minSizeStr, topN, drillRatio*100)
+	if staleMode {
+		fmt.Printf("  stale-days=%d (cutoff=%s)", staleDays, cutoff.Format("2006-01-02"))
+	}
+	fmt.Printf("\n")
+
+	// Phase 1: walk and collect per-directory stats.
+	start := time.Now()
+	dirMap := walkAll(target, workers, cutoff)
+	elapsed := time.Since(start)
+
+	// Phase 2: build tree from flat map.
+	root := buildTree(target, dirMap)
+	if root == nil {
+		return fmt.Errorf("no data found")
+	}
+
+	// Phase 3: if stale filter, compute stale size per subtree.
+	if staleMode {
+		computeStaleSize(root)
+	}
+
+	fmt.Printf("Scanned %s in %s (%d files)\n\n",
+		humanize.IBytes(uint64(root.totalSize)),
+		elapsed.Round(time.Millisecond),
+		root.fileCount)
+
+	// Phase 4: get top-level children, filter by size and sort.
+	candidates := root.children
+	filtered := make([]*dirNode, 0)
+	for _, c := range candidates {
+		if staleMode {
+			if c.staleSize >= minBytes {
+				filtered = append(filtered, c)
+			}
+		} else {
+			if c.totalSize >= minBytes {
+				filtered = append(filtered, c)
+			}
+		}
+	}
+	candidates = filtered
+
+	if staleMode {
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].staleSize > candidates[j].staleSize
+		})
+	} else {
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].totalSize > candidates[j].totalSize
+		})
+	}
+	if len(candidates) > topN {
+		candidates = candidates[:topN]
+	}
+
+	// Phase 5: print results.
+	if staleMode {
+		fmt.Printf("%9s  %9s  %10s  %9s  %s\n", "STALE", "TOTAL", "ACCESSED", "FILES", "PATH")
+	} else {
+		fmt.Printf("%9s  %10s  %9s  %s\n", "SIZE", "ACCESSED", "FILES", "PATH")
+	}
+
+	for _, c := range candidates {
+		printNode(c, target, drillRatio, minBytes, staleMode)
+	}
+	return nil
+}
+
+func printNode(n *dirNode, root string, drillRatio float64, minBytes int64, staleMode bool) {
+	rel, _ := filepath.Rel(root, n.path)
+	date := n.newestTime.Format("2006-01-02")
+	if staleMode {
+		fmt.Printf("%9s  %9s  %10s  %9d  %s/\n",
+			humanize.IBytes(uint64(n.staleSize)),
+			humanize.IBytes(uint64(n.totalSize)),
+			date, n.fileCount, rel)
+	} else {
+		fmt.Printf("%9s  %10s  %9d  %s/\n",
+			humanize.IBytes(uint64(n.totalSize)),
+			date, n.fileCount, rel)
+	}
+
+	// Find children worth drilling into.
+	sizeFunc := func(c *dirNode) int64 {
+		if staleMode {
+			return c.staleSize
+		}
+		return c.totalSize
+	}
+
+	parentSize := sizeFunc(n)
+	drillThreshold := int64(float64(parentSize) * drillRatio)
+	var drillChildren []*dirNode
+	for _, c := range n.children {
+		cs := sizeFunc(c)
+		if cs >= drillThreshold && cs >= minBytes {
+			drillChildren = append(drillChildren, c)
+		}
+	}
+
+	if len(drillChildren) == 0 {
+		return
+	}
+
+	sort.Slice(drillChildren, func(i, j int) bool {
+		return sizeFunc(drillChildren[i]) > sizeFunc(drillChildren[j])
+	})
+
+	for _, c := range drillChildren {
+		printNode(c, root, drillRatio, minBytes, staleMode)
+	}
+}
+
+// computeStaleSize propagates stale sizes up the tree.
+// ownStaleSize is already computed during the walk (per-file check).
+func computeStaleSize(n *dirNode) {
+	n.staleSize = n.ownStaleSize
+	for _, c := range n.children {
+		computeStaleSize(c)
+		n.staleSize += c.staleSize
+	}
+}
+
+// buildTree constructs a directory tree from the flat per-directory stats map.
+func buildTree(root string, dirMap map[string]*dirNode) *dirNode {
+	rootNode, ok := dirMap[root]
+	if !ok {
+		rootNode = &dirNode{name: filepath.Base(root), path: root}
+		dirMap[root] = rootNode
+	}
+
+	// Link children to parents.
+	for path, node := range dirMap {
+		if path == root {
+			continue
+		}
+		parentPath := filepath.Dir(path)
+		parent, ok := dirMap[parentPath]
+		if !ok {
+			continue
+		}
+		parent.children = append(parent.children, node)
+	}
+
+	// Propagate sizes up: children stats bubble up to parents.
+	propagate(rootNode)
+
+	return rootNode
+}
+
+// propagate recursively computes total size, file count, and newest time
+// by summing own stats plus all children.
+func propagate(n *dirNode) {
+	n.totalSize = n.ownSize
+	n.fileCount = n.ownFiles
+	n.newestTime = n.ownTime
+	for _, c := range n.children {
+		propagate(c)
+		n.totalSize += c.totalSize
+		n.fileCount += c.fileCount
+		if c.newestTime.After(n.newestTime) {
+			n.newestTime = c.newestTime
+		}
+	}
+}
+
+// walkAll walks the entire directory tree and returns per-directory stats.
+// Each directory entry contains only the files directly in that directory
+// (not recursively summed — that happens in propagate).
+func walkAll(target string, numWorkers int, cutoff time.Time) map[string]*dirNode {
 	var (
-		mu   sync.Mutex
-		dirs = make(map[string]*dirStats)
-		wg   sync.WaitGroup
-		ch   = make(chan string, 4096)
+		mu     sync.Mutex
+		result = make(map[string]*dirNode)
+		wg     sync.WaitGroup
+		ch     = make(chan string, 4096)
 	)
 
-	targetLen := len(target)
-	bucketKey := func(path string) string {
-		rel := path[targetLen:]
-		if len(rel) > 0 && rel[0] == '/' {
-			rel = rel[1:]
-		}
-		if rel == "" {
-			return target
-		}
-		count := 0
-		for i := 0; i < len(rel); i++ {
-			if rel[i] == '/' {
-				count++
-				if count >= depth {
-					return target + "/" + rel[:i]
-				}
-			}
-		}
-		return target + "/" + rel
-	}
-
-	merge := func(bucket map[string]*dirStats, key string, size int64, atime time.Time) {
-		d, ok := bucket[key]
-		if !ok {
-			d = &dirStats{path: key}
-			bucket[key] = d
-		}
-		d.totalSize += size
-		d.fileCount++
-		if atime.After(d.newestTime) {
-			d.newestTime = atime
-		}
-	}
-
-	flushLocal := func(localDirs map[string]*dirStats) {
-		if len(localDirs) == 0 {
-			return
-		}
-		mu.Lock()
-		for key, ld := range localDirs {
-			d, ok := dirs[key]
-			if !ok {
-				d = &dirStats{path: key}
-				dirs[key] = d
-			}
-			d.totalSize += ld.totalSize
-			d.fileCount += ld.fileCount
-			if ld.newestTime.After(d.newestTime) {
-				d.newestTime = ld.newestTime
-			}
-		}
-		mu.Unlock()
-	}
-
-	// readDir uses raw getdents64 to read directory entries without sorting.
-	// Returns entry names and whether each is a directory (from d_type).
 	type dirEntry struct {
 		name  string
 		isDir bool
@@ -167,7 +290,6 @@ func walkAndAggregate(target string, depth, numWorkers int) map[string]*dirStats
 			for offset < n {
 				dirent := (*syscall.Dirent)(unsafe.Pointer(&buf[offset]))
 				nameBytes := buf[offset+nameOffset() : offset+int(dirent.Reclen)]
-				// Find null terminator.
 				nameLen := 0
 				for nameLen < len(nameBytes) && nameBytes[nameLen] != 0 {
 					nameLen++
@@ -179,31 +301,40 @@ func walkAndAggregate(target string, depth, numWorkers int) map[string]*dirStats
 					continue
 				}
 
-				isDir := dirent.Type == syscall.DT_DIR
-				entries = append(entries, dirEntry{name: name, isDir: isDir})
+				entries = append(entries, dirEntry{name: name, isDir: dirent.Type == syscall.DT_DIR})
 			}
 		}
 		return entries, nil
 	}
 
-	var processDir func(dir string, localDirs map[string]*dirStats, flushFn func(map[string]*dirStats))
+	var processDir func(dir string, localResult map[string]*dirNode)
 
-	processDir = func(dir string, localDirs map[string]*dirStats, flushFn func(map[string]*dirStats)) {
+	processDir = func(dir string, localResult map[string]*dirNode) {
 		entries, err := readDir(dir)
 		if err != nil {
 			return
+		}
+
+		node, ok := localResult[dir]
+		if !ok {
+			node = &dirNode{name: filepath.Base(dir), path: dir}
+			localResult[dir] = node
 		}
 
 		for _, entry := range entries {
 			fullPath := dir + "/" + entry.name
 
 			if entry.isDir {
+				// Ensure child dir exists in local map so tree building works.
+				if _, ok := localResult[fullPath]; !ok {
+					localResult[fullPath] = &dirNode{name: entry.name, path: fullPath}
+				}
 				wg.Add(1)
 				select {
 				case ch <- fullPath:
 				default:
 					wg.Done()
-					processDir(fullPath, localDirs, flushFn)
+					processDir(fullPath, localResult)
 				}
 				continue
 			}
@@ -213,31 +344,68 @@ func walkAndAggregate(target string, depth, numWorkers int) map[string]*dirStats
 				continue
 			}
 
-			// Use atime for staleness.
 			atime := time.Unix(st.Atim.Sec, st.Atim.Nsec)
-			key := bucketKey(fullPath)
-			merge(localDirs, key, st.Size, atime)
+			node.ownSize += st.Size
+			node.ownFiles++
+			if atime.After(node.ownTime) {
+				node.ownTime = atime
+			}
+			if !cutoff.IsZero() && atime.Before(cutoff) {
+				node.ownStaleSize += st.Size
+			}
 		}
 	}
 
+	flushLocal := func(localResult map[string]*dirNode) {
+		if len(localResult) == 0 {
+			return
+		}
+		mu.Lock()
+		for path, ln := range localResult {
+			n, ok := result[path]
+			if !ok {
+				result[path] = &dirNode{
+					name:         ln.name,
+					path:         ln.path,
+					ownSize:      ln.ownSize,
+					ownFiles:     ln.ownFiles,
+					ownTime:      ln.ownTime,
+					ownStaleSize: ln.ownStaleSize,
+				}
+			} else {
+				n.ownSize += ln.ownSize
+				n.ownFiles += ln.ownFiles
+				if ln.ownTime.After(n.ownTime) {
+					n.ownTime = ln.ownTime
+				}
+				n.ownStaleSize += ln.ownStaleSize
+			}
+		}
+		mu.Unlock()
+	}
+
+	var workerWg sync.WaitGroup
+
 	worker := func() {
-		localDirs := make(map[string]*dirStats)
+		localResult := make(map[string]*dirNode)
 		flushCount := 0
 
 		for dir := range ch {
-			processDir(dir, localDirs, flushLocal)
+			processDir(dir, localResult)
 			flushCount++
 			if flushCount >= 128 {
-				flushLocal(localDirs)
-				localDirs = make(map[string]*dirStats)
+				flushLocal(localResult)
+				localResult = make(map[string]*dirNode)
 				flushCount = 0
 			}
 			wg.Done()
 		}
-		flushLocal(localDirs)
+		flushLocal(localResult)
+		workerWg.Done()
 	}
 
 	for i := 0; i < numWorkers; i++ {
+		workerWg.Add(1)
 		go worker()
 	}
 
@@ -246,11 +414,11 @@ func walkAndAggregate(target string, depth, numWorkers int) map[string]*dirStats
 
 	wg.Wait()
 	close(ch)
+	workerWg.Wait()
 
-	return dirs
+	return result
 }
 
-// nameOffset returns the byte offset of the d_name field in syscall.Dirent.
 func nameOffset() int {
 	var d syscall.Dirent
 	return int(unsafe.Offsetof(d.Name))
