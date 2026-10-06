@@ -12,35 +12,65 @@ Covers HTTP/HTTPS reverse proxy with TLS, filesystem SDS, health checking, DNS, 
 
 ### Setup
 
-#### 1. Patch `bazel/toolchains.bzl` (re-apply after each git pull)
+Verified against Envoy `main` (1.40.0-dev, bzlmod, Bazel 8.8.0, hermetic LLVM 22.1.8) on
+Ubuntu 24.04. See "Pre-bzlmod branches" below for release branches such as v1.38.x.
 
-Change `_LLVM_VERSION_HERMETIC` from `"18.1.8"` to `"21.1.8"`.
-This works on Ubuntu 24.04.4 LTS.
+#### 1. No toolchain patch needed
+
+Do **not** patch `bazel/toolchains.bzl`. On main that file no longer defines a version —
+it re-exports from `@llvm_toolchain_llvm//:llvm.bzl`. The hermetic LLVM version lives in
+`bazel/extensions.bzl` (`_LLVM_VERSION`) and `MODULE.bazel`, and is used by default.
 
 #### 2. `user.bazelrc`
 
 ```
-build --config=clang
 build --disk_cache=~/.cache/envoy-bazel
 build --experimental_disk_cache_gc_max_size=20G
 build --experimental_disk_cache_gc_max_age=14d
 build --local_resources=cpu=HOST_CPUS*0.3
 build --local_resources=memory=HOST_RAM*0.3
 build --copt=-Wno-nullability-completeness
-build --override_repository=envoy_build_config=%workspace%/envoy_lightweight_build_config
-build --@envoy//bazel:http3=False
+
+# Must be `common`, not `build`: otherwise query/cquery ignore the override and
+# silently analyse the FULL extension set.
+common --override_repository=+envoy_build_config_ext+envoy_build_config=%workspace%/envoy_lightweight_build_config
+
+build --//bazel:http3=False
 ```
 
-Resource limits at 0.3 keep the machine usable during builds.
+Three things that are easy to get wrong:
+
+- **No `--config=clang`.** That config no longer exists in `.bazelrc` on main; it fails with
+  `Config value 'clang' is not defined in any .rc file`. Check with
+  `bazel canonicalize-flags --config=clang -- --compilation_mode=fastbuild`.
+- **The override repo name must be canonical.** `envoy_build_config` is created by the
+  `envoy_build_config_ext` module extension, so plain
+  `--override_repository=envoy_build_config=...` is *silently ignored* and you get a full
+  ~334-extension build. The canonical name is `+envoy_build_config_ext+envoy_build_config`.
+  This is documented in `bazel/README.md` → "Customize extension build config".
+- **Keep resource limits at 0.3.** Envoy compiles are memory-hungry; raising these pushes the
+  machine into swap. 0.3 of 20 CPUs ≈ 6 concurrent actions, visible as
+  `(N actions, 6 running)` in the build output.
+
+Verify the override actually took effect before starting a long build:
+
+```bash
+OB=$(bazel info output_base)
+ls -l "$OB/external/+envoy_build_config_ext+envoy_build_config/extensions_build_config.bzl"
+```
+
+A **symlink into `source/extensions/`** means the override was ignored (full build).
+A **regular file** matching your lightweight copy means it worked.
 
 #### 3. `envoy_lightweight_build_config/`
 
 Directory in repo root. Overrides the `@envoy_build_config` Bazel repository to control which extensions are compiled.
 
-Three files:
+Files:
 
-- `WORKSPACE` — empty (required by Bazel to recognize as repository)
+- `MODULE.bazel` — empty (required under bzlmod for `--override_repository` to accept the dir)
 - `BUILD` — empty (required by Bazel)
+- `WORKSPACE` — empty (harmless; only needed for pre-bzlmod branches)
 - `extensions_build_config.bzl` — content below:
 
 ```python
@@ -89,19 +119,98 @@ bazel build -c fastbuild //source/exe:envoy-static
 
 Binary at `bazel-bin/source/exe/envoy-static`.
 
+Expect roughly **7.7k actions** for the lightweight set (a full build is 30k+). From a warm
+disk cache that is ~15 min at `cpu=HOST_CPUS*0.3`; from cold, closer to an hour.
+
+**Requires ~20 GB free disk.** Bazel reports `No space left on device` from inside a sandbox
+action, which looks like a compile error but is not — check `df -h /` first. See Maintenance
+for what is safe to reclaim.
+
+`-c fastbuild` is unstripped, so crashes produce **fully symbolized backtraces** with Envoy's
+signal handler. This is the main reason to build locally when debugging a crash: the released
+`envoyproxy/envoy` images are stripped (`nm` reports "no symbols"), so their backtraces are
+bare addresses and `tools/stack_decode.py` has nothing to work with. A local fastbuild also
+enables `ASSERT()`, which is compiled out of release builds — so a release-build SIGSEGV often
+surfaces locally as a clean assert naming the exact failing invariant.
+
 ### Adding extensions
 
 If runtime error "No registered factory for X" — find the extension in `source/extensions/extensions_build_config.bzl` and add to your override.
 
 Common additions: `envoy.config_subscription.grpc`, `envoy.clusters.eds`, `envoy.filters.http.fault`, `envoy.compression.gzip.compressor`/`.decompressor`.
 
+For gRPC xDS (`api_config_source` or `ads`) you need all of these, not just the subscription:
+
+```python
+"envoy.config_subscription.grpc": "//source/extensions/config_subscription/grpc:grpc_subscription_lib",
+"envoy.config_subscription.delta_grpc": "//source/extensions/config_subscription/grpc:grpc_subscription_lib",
+"envoy.config_subscription.ads": "//source/extensions/config_subscription/grpc:grpc_subscription_lib",
+"envoy.config_mux.delta_grpc_mux_factory": "//source/extensions/config_subscription/grpc/xds_mux:grpc_mux_lib",
+"envoy.config_mux.sotw_grpc_mux_factory": "//source/extensions/config_subscription/grpc/xds_mux:grpc_mux_lib",
+```
+
+Bootstrap also needs a `node` with `id` and `cluster` set, or Envoy exits with
+`node 'id' and 'cluster' are required`.
+
+Verify a target exists on your branch before adding it:
+
+```bash
+grep -n '"envoy\.your\.extension"' source/extensions/extensions_build_config.bzl
+```
+
 ### Maintenance
 
 - Disk cache GC is automatic via `--experimental_disk_cache_gc_max_size=20G` and `--experimental_disk_cache_gc_max_age=14d` in `user.bazelrc`. Bazel prunes the cache during builds. Available since Bazel 7.4.
 - Check cache size: `du -sh ~/.cache/envoy-bazel`
-- Manual trim: `find ~/.cache/envoy-bazel -atime +14 -delete`
 - `user.bazelrc` and `envoy_lightweight_build_config/` are untracked — survive git pull.
-- `bazel/toolchains.bzl` patch is tracked — re-apply after pull.
+- No tracked files need patching after a pull (the old `bazel/toolchains.bzl` patch is obsolete).
+
+#### Reclaiming disk space
+
+Bazel's GC only manages the `ac/` and `cas/` subdirs of the disk cache. Everything else
+accumulates forever. Checked with `du -sh`, these are safe to delete:
+
+```bash
+cd ~/work/envoy && bazel shutdown
+OB=$(bazel info output_base)          # e.g. ~/.cache/bazel/_bazel_$USER/<hash>
+
+# Stale WORKSPACE-era execroot. bzlmod builds use execroot/_main, so any
+# execroot/<workspace-name> left from a pre-bzlmod branch is dead weight (10G+).
+rm -rf "$OB/execroot/envoy"
+
+# Bazel sandbox leftovers.
+rm -rf "$OB/sandbox/_moved_trash_dir" "$OB/sandbox/sandbox_stash"
+
+# Stray dirs that are NOT part of a --disk_cache (which only uses ac/ and cas/).
+rm -rf ~/.cache/envoy-bazel/bazel_root ~/.cache/envoy-bazel/repository_cache
+```
+
+Confirm which execroot is live before deleting: `ls -l bazel-bin` points at the one in use.
+
+Do **not** delete `$OB/external` (the extracted external repos, 20G+) or `$OB/execroot/_main`
+while you intend to keep incremental state.
+
+The disk cache itself (`~/.cache/envoy-bazel/{ac,cas}`) is keyed to the toolchain. After an
+LLVM bump it is nearly useless — check the build summary: a line like
+`7084 action cache hit, 11 disk cache hit` means the 15G of `cas/` is buying you almost
+nothing and can be dropped if you need the space.
+
+### Pre-bzlmod branches (v1.38.x and older)
+
+Release branches still use WORKSPACE, and the setup above does not apply:
+
+- `bazel/toolchains.bzl` defines `_LLVM_VERSION_HERMETIC`; set it to `"21.1.8"` on
+  Ubuntu 24.04. This file is tracked, so re-apply after each checkout/pull.
+- Use `build --config=clang` (it exists there).
+- Override with the plain apparent name:
+  `build --override_repository=envoy_build_config=%workspace%/envoy_lightweight_build_config`
+- The override dir needs `WORKSPACE` rather than `MODULE.bazel`.
+- Use `--@envoy//bazel:http3=False`.
+
+Switching branches between these two worlds invalidates the whole disk cache (different LLVM)
+and leaves a stale `execroot/envoy` behind. Prefer debugging on `main` — a fix has to land
+there anyway — and only build a release branch when you specifically need to confirm
+release-branch behaviour.
 
 ### Format Source Code
 
@@ -146,9 +255,12 @@ Use following tools
 ```bash
 runagent run -n echoserver -- go run github.com/tsaarni/echoserver@latest
 runagent run -n envoy -- bazel-bin/source/exe/envoy-static -c test-config.yaml --log-level warn
-runagent status echoserver
+runagent ps echoserver
 runagent logs envoy --last 10
 ```
+
+`runagent ps <name>` — there is no `runagent status`. For long jobs such as a build, use
+`runagent wait <name>` to block until exit instead of polling with `sleep`.
 
 ### Envoy Config Template
 
