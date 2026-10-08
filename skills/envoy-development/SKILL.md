@@ -80,6 +80,7 @@ EXTENSIONS = {
     "envoy.clusters.static": "//source/extensions/clusters/static:static_cluster_lib",
     "envoy.clusters.strict_dns": "//source/extensions/clusters/strict_dns:strict_dns_cluster_lib",
     "envoy.clusters.logical_dns": "//source/extensions/clusters/logical_dns:logical_dns_cluster_lib",
+    "envoy.clusters.dns": "//source/extensions/clusters/dns:dns_cluster_lib",
     "envoy.network.dns_resolver.cares": "//source/extensions/network/dns_resolver/cares:config",
     "envoy.config_subscription.filesystem": "//source/extensions/config_subscription/filesystem:filesystem_subscription_lib",
     "envoy.filters.http.router": "//source/extensions/filters/http/router:config",
@@ -158,6 +159,62 @@ Verify a target exists on your branch before adding it:
 grep -n '"envoy\.your\.extension"' source/extensions/extensions_build_config.bzl
 ```
 
+### Minimum extensions for Contour
+
+When testing with Contour, the lightweight build needs these extensions beyond the base set.
+See Contour's [compatibility matrix](https://projectcontour.io/resources/compatibility-matrix/)
+for the full list (`site/content/resources/compatibility-matrix.md` in the Contour repo).
+
+```python
+# gRPC xDS (required for Contour control plane connection)
+"envoy.config_subscription.grpc": "//source/extensions/config_subscription/grpc:grpc_subscription_lib",
+"envoy.config_subscription.delta_grpc": "//source/extensions/config_subscription/grpc:grpc_subscription_lib",
+"envoy.config_subscription.ads": "//source/extensions/config_subscription/grpc:grpc_subscription_lib",
+"envoy.config_mux.delta_grpc_mux_factory": "//source/extensions/config_subscription/grpc/xds_mux:grpc_mux_lib",
+"envoy.config_mux.sotw_grpc_mux_factory": "//source/extensions/config_subscription/grpc/xds_mux:grpc_mux_lib",
+
+# Clusters
+"envoy.clusters.eds": "//source/extensions/clusters/eds:eds_lib",
+
+# HTTP filters (Contour DefaultFilters)
+"envoy.filters.http.compressor": "//source/extensions/filters/http/compressor:config",
+"envoy.filters.http.cors": "//source/extensions/filters/http/cors:config",
+"envoy.filters.http.grpc_stats": "//source/extensions/filters/http/grpc_stats:config",
+"envoy.filters.http.grpc_web": "//source/extensions/filters/http/grpc_web:config",
+"envoy.filters.http.local_ratelimit": "//source/extensions/filters/http/local_ratelimit:config",
+"envoy.filters.http.lua": "//source/extensions/filters/http/lua:config",
+"envoy.filters.http.rbac": "//source/extensions/filters/http/rbac:config",
+
+# Compression
+"envoy.compression.gzip.compressor": "//source/extensions/compression/gzip/compressor:config",
+
+# Access log rate limiting
+"envoy.access_loggers.extension_filters.process_ratelimit": "//source/extensions/access_loggers/filters/process_ratelimit:config",
+```
+
+### Build Container Image for Kind
+
+Package the locally built binary into a container for testing in Kind clusters:
+
+```bash
+cat > /tmp/Dockerfile.envoy-debug <<'EOF'
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN useradd -u 101 -m envoy
+COPY envoy-static /usr/local/bin/envoy
+RUN chmod +x /usr/local/bin/envoy
+USER 101
+ENTRYPOINT ["/usr/local/bin/envoy"]
+EOF
+
+cp ~/work/envoy/bazel-bin/source/exe/envoy-static /tmp/envoy-static
+docker build --no-cache -t localhost/envoy-debug:latest -f /tmp/Dockerfile.envoy-debug /tmp/
+kind load docker-image localhost/envoy-debug:latest --name contour
+```
+
+Then patch the envoy daemonset/deployment to use `localhost/envoy-debug:latest` with
+`imagePullPolicy: Never`. Delete envoy pods to pick up the new image.
+
 ### Maintenance
 
 - Disk cache GC is automatic via `--experimental_disk_cache_gc_max_size=20G` and `--experimental_disk_cache_gc_max_age=14d` in `user.bazelrc`. Bazel prunes the cache during builds. Available since Bazel 7.4.
@@ -232,6 +289,36 @@ Or if you just want clang-format on those specific files without the full checke
 ```bash
 bazel run @llvm_toolchain_llvm//:bin/clang-format -- -i <file1> <file2> ...
 ```
+
+### Build Documentation Locally
+
+Build and serve the Sphinx docs to preview changelog entries, API docs, etc.
+
+**Gotcha:** `docs/.bazelrc` does `try-import ../user.bazelrc`, which pulls in
+`--//bazel:http3=False`. That flag doesn't exist in the docs Bazel module and breaks the
+build. Workaround: temporarily remove the line before building, restore after.
+
+```bash
+cd ~/work/envoy
+cp user.bazelrc user.bazelrc.bak
+grep -v "http3" user.bazelrc > user.bazelrc.tmp && mv user.bazelrc.tmp user.bazelrc
+
+cd docs && bazel build //:html
+
+cp ../user.bazelrc.bak ../user.bazelrc
+```
+
+**Serve:** The output `docs/bazel-bin/html.tar.gz` is a plain tar (not gzipped, despite the
+name):
+
+```bash
+rm -rf /tmp/envoy-docs && mkdir -p /tmp/envoy-docs
+tar xf ~/work/envoy/docs/bazel-bin/html.tar.gz -C /tmp/envoy-docs
+runagent run -n envoy-docs-server -- python3 -m http.server 8888 --directory /tmp/envoy-docs
+```
+
+Browse `http://localhost:8888`. Changelog at
+`http://localhost:8888/version_history/v1.40/v1.40.0.html`.
 
 ### Generate `compile_commands.json` for vscode
 

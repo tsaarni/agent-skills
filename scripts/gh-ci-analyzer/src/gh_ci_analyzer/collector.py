@@ -9,7 +9,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .gh import gh_json, make_cwd_relative, run_gh, sanitize, write_json
-from .models import FailedRun, RecentFailedRun, RecentTemplateContext, RunLog, TemplateContext
+from .models import (
+    FailedRun,
+    RecentFailedRun,
+    RecentTemplateContext,
+    RunLog,
+    TemplateContext,
+)
 
 RUN_ID_RE = re.compile(r"actions/runs/(\d+)")
 logger = logging.getLogger(__name__)
@@ -80,10 +86,20 @@ def fetch_pr_data(ctx: AnalysisContext) -> None:
     owner, repo = ctx.repo.split("/", 1)
 
     data = gh_json(
-        ["api", "graphql",
-         "-F", f"owner={owner}", "-F", f"repo={repo}", "-F", f"pr={ctx.pr}",
-         "-f", f"query={GRAPHQL_QUERY}"],
-        default={}, retries=ctx.gh_retries,
+        [
+            "api",
+            "graphql",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"repo={repo}",
+            "-F",
+            f"pr={ctx.pr}",
+            "-f",
+            f"query={GRAPHQL_QUERY}",
+        ],
+        default={},
+        retries=ctx.gh_retries,
     )
 
     pr = (data.get("data") or {}).get("repository", {}).get("pullRequest") or {}
@@ -96,10 +112,17 @@ def fetch_pr_data(ctx: AnalysisContext) -> None:
     ctx.pr_branch = pr.get("headRefName", "")
     ctx.base_branch = pr.get("baseRefName", "")
     ctx.head_sha = pr.get("headRefOid", "")
-    ctx.head_owner = (pr.get("headRepository") or {}).get("owner", {}).get("login") or owner
+    ctx.head_owner = (pr.get("headRepository") or {}).get("owner", {}).get(
+        "login"
+    ) or owner
     ctx.changed_files = (pr.get("files") or {}).get("nodes") or []
 
-    logger.info("    PR branch: %s, head owner: %s, base: %s", ctx.pr_branch, ctx.head_owner, ctx.base_branch)
+    logger.info(
+        "    PR branch: %s, head owner: %s, base: %s",
+        ctx.pr_branch,
+        ctx.head_owner,
+        ctx.base_branch,
+    )
     logger.info("    HEAD SHA: %s", ctx.head_sha)
 
     # Write pull-request.json for agent reference
@@ -119,20 +142,80 @@ def fetch_pr_data(ctx: AnalysisContext) -> None:
             ctx.run_map[run_id] = wf_name or "failed run"
 
         # Scan failed check runs for delegated workflow IDs
-        for cr in ((suite.get("checkRuns") or {}).get("nodes") or []):
+        for cr in (suite.get("checkRuns") or {}).get("nodes") or []:
             cr_name = cr.get("name") or "delegated check"
             details_url = cr.get("detailsUrl") or ""
             for did in RUN_ID_RE.findall(details_url):
                 if did not in ctx.run_map:
                     ctx.run_map[did] = f"{cr_name} (delegated)"
-                    logger.info("    Found delegated run %s from check '%s'", did, cr_name)
+                    logger.info(
+                        "    Found delegated run %s from check '%s'", did, cr_name
+                    )
+
+
+def discover_check_run_refs(ctx: AnalysisContext) -> None:
+    """Use the REST API to find workflow run IDs stored in check run external_id fields.
+
+    Custom GitHub Apps (e.g. Envoy's ci-envoy) create check runs on the PR commit but
+    delegate the actual work to workflow_run-triggered workflows.  GraphQL doesn't expose
+    external_id, and the detailsUrl often points to a static page rather than a run URL.
+    The REST Checks API does expose external_id, which these apps populate with the
+    delegated workflow run's database ID.
+    """
+    if not ctx.head_sha:
+        return
+
+    # Non-success conclusions that indicate a problem worth investigating.
+    # CANCELLED suites may contain failed check runs from a previous attempt that was
+    # superseded, so we include them.
+    interesting = {"failure", "cancelled", "timed_out", "action_required"}
+
+    logger.info("==> Discovering check run references via REST API")
+    data = gh_json(
+        ["api", f"repos/{ctx.repo}/commits/{ctx.head_sha}/check-runs", "--paginate"],
+        default={},
+        allow_fail=True,
+        retries=ctx.gh_retries,
+    )
+    check_runs = (data.get("check_runs") or []) if isinstance(data, dict) else []
+
+    for cr in check_runs:
+        if not isinstance(cr, dict):
+            continue
+        conclusion = (cr.get("conclusion") or "").lower()
+        if conclusion not in interesting:
+            continue
+
+        cr_name = cr.get("name") or "check run"
+        external_id = cr.get("external_id") or ""
+
+        # Skip if already discovered via GraphQL or detailsUrl
+        if external_id in ctx.run_map:
+            continue
+
+        # detailsUrl may contain a run ID we missed in the GraphQL pass
+        details_url = cr.get("details_url") or ""
+        for did in RUN_ID_RE.findall(details_url):
+            if did not in ctx.run_map:
+                ctx.run_map[did] = cr_name
+                logger.info(
+                    "    Found run %s from detailsUrl of check '%s'", did, cr_name
+                )
+
+        # external_id is the primary discovery path for custom-app check runs
+        if external_id.isdigit() and external_id not in ctx.run_map:
+            ctx.run_map[external_id] = cr_name
+            logger.info(
+                "    Found run %s from external_id of check '%s'", external_id, cr_name
+            )
 
 
 def fetch_pr_diff(ctx: AnalysisContext) -> None:
     logger.info("==> Fetching PR diff")
     diff = run_gh(
         ["pr", "diff", ctx.pr, "--repo", ctx.repo],
-        allow_fail=True, retries=ctx.gh_retries,
+        allow_fail=True,
+        retries=ctx.gh_retries,
     )
     (ctx.prdir / "pr.diff").write_text(diff.stdout, encoding="utf-8")
 
@@ -144,49 +227,85 @@ def fetch_base_failures(ctx: AnalysisContext) -> None:
     owner, repo = ctx.repo.split("/", 1)
 
     data = gh_json(
-        ["api", "graphql",
-         "-F", f"owner={owner}", "-F", f"repo={repo}",
-         "-F", f"branch=refs/heads/{ctx.base_branch}",
-         "-F", f"count={ctx.max_base_failures}",
-         "-f", f"query={BASE_FAILURES_QUERY}"],
-        default={}, allow_fail=True, retries=ctx.gh_retries,
+        [
+            "api",
+            "graphql",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"repo={repo}",
+            "-F",
+            f"branch=refs/heads/{ctx.base_branch}",
+            "-F",
+            f"count={ctx.max_base_failures}",
+            "-f",
+            f"query={BASE_FAILURES_QUERY}",
+        ],
+        default={},
+        allow_fail=True,
+        retries=ctx.gh_retries,
     )
 
     commits = (
-        ((((data.get("data") or {}).get("repository") or {}).get("ref") or {})
-         .get("target") or {}).get("history") or {}
+        (
+            (((data.get("data") or {}).get("repository") or {}).get("ref") or {}).get(
+                "target"
+            )
+            or {}
+        ).get("history")
+        or {}
     ).get("nodes") or []
 
     # Extract failed runs with job names from commit check suites
     failures = []
     for commit in commits:
-        for suite in ((commit.get("checkSuites") or {}).get("nodes") or []):
+        for suite in (commit.get("checkSuites") or {}).get("nodes") or []:
             if (suite.get("conclusion") or "").upper() != "FAILURE":
                 continue
             wf_run = suite.get("workflowRun") or {}
-            failed_checks = [cr.get("name") for cr in ((suite.get("checkRuns") or {}).get("nodes") or [])]
-            failures.append({
-                "workflow": ((wf_run.get("workflow") or {}).get("name") or "unknown"),
-                "runId": wf_run.get("databaseId"),
-                "committedDate": commit.get("committedDate"),
-                "commit": commit.get("oid", "")[:12],
-                "failedJobs": failed_checks,
-            })
+            failed_checks = [
+                cr.get("name")
+                for cr in ((suite.get("checkRuns") or {}).get("nodes") or [])
+            ]
+            failures.append(
+                {
+                    "workflow": (
+                        (wf_run.get("workflow") or {}).get("name") or "unknown"
+                    ),
+                    "runId": wf_run.get("databaseId"),
+                    "committedDate": commit.get("committedDate"),
+                    "commit": commit.get("oid", "")[:12],
+                    "failedJobs": failed_checks,
+                }
+            )
 
     ctx.base_failures = failures
     write_json(ctx.prdir / "base-branch-failures.json", failures)
 
 
 def fallback_discover_by_branch(ctx: AnalysisContext) -> None:
-    """Fallback: if GraphQL found no failed runs, try gh run list by branch."""
+    """Fallback: if no failed runs found yet, try gh run list by branch."""
     if ctx.run_map or not ctx.pr_branch:
         return
     logger.info("==> Fallback: discovering failed runs by branch")
     runs = gh_json(
-        ["run", "list", "--repo", ctx.repo, "--branch", ctx.pr_branch,
-         "--status", "failure", "--json", "databaseId,name,headSha",
-         "--limit", str(ctx.max_runs)],
-        default=[], allow_fail=True, retries=ctx.gh_retries,
+        [
+            "run",
+            "list",
+            "--repo",
+            ctx.repo,
+            "--branch",
+            ctx.pr_branch,
+            "--status",
+            "failure",
+            "--json",
+            "databaseId,name,headSha",
+            "--limit",
+            str(ctx.max_runs),
+        ],
+        default=[],
+        allow_fail=True,
+        retries=ctx.gh_retries,
     )
     if not isinstance(runs, list):
         return
@@ -210,11 +329,15 @@ def download_failed_job_logs(ctx: AnalysisContext) -> None:
 
         run_view = gh_json(
             ["run", "view", run_id, "--repo", ctx.repo, "--json", "jobs"],
-            default={}, allow_fail=True, retries=ctx.gh_retries,
+            default={},
+            allow_fail=True,
+            retries=ctx.gh_retries,
         )
         jobs = (run_view.get("jobs") or []) if isinstance(run_view, dict) else []
         write_json(run_dir / "jobs.json", jobs)
-        failed_jobs = [j for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"]
+        failed_jobs = [
+            j for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"
+        ]
 
         if not failed_jobs:
             logger.info("    Run %s: no failed jobs, skipping", run_id)
@@ -227,8 +350,18 @@ def download_failed_job_logs(ctx: AnalysisContext) -> None:
                 continue
             logger.info("    Run %s, job '%s' (%s)", run_id, job_name, job_id)
             log = run_gh(
-                ["run", "view", run_id, "--repo", ctx.repo, "--job", job_id, "--log-failed"],
-                allow_fail=True, retries=ctx.gh_retries,
+                [
+                    "run",
+                    "view",
+                    run_id,
+                    "--repo",
+                    ctx.repo,
+                    "--job",
+                    job_id,
+                    "--log-failed",
+                ],
+                allow_fail=True,
+                retries=ctx.gh_retries,
             )
             text = log.stdout
             if log.returncode != 0 and log.stderr:
@@ -247,7 +380,9 @@ def download_failed_job_logs(ctx: AnalysisContext) -> None:
             try:
                 future.result()
             except Exception as exc:
-                logger.warning("    Run %s: log download failed: %s", futures[future], exc)
+                logger.warning(
+                    "    Run %s: log download failed: %s", futures[future], exc
+                )
 
 
 def collect(ctx: AnalysisContext) -> None:
@@ -258,6 +393,7 @@ def collect(ctx: AnalysisContext) -> None:
     fetch_pr_data(ctx)
     fetch_pr_diff(ctx)
     fetch_base_failures(ctx)
+    discover_check_run_refs(ctx)
     fallback_discover_by_branch(ctx)
 
     if ctx.run_map:
@@ -287,11 +423,19 @@ def build_template_context(ctx: AnalysisContext) -> TemplateContext:
                 jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
                 failed_jobs = [
                     str(j.get("name") or "unknown")
-                    for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"
+                    for j in jobs
+                    if isinstance(j, dict) and j.get("conclusion") == "failure"
                 ]
             except (json.JSONDecodeError, OSError):
                 pass
-        failed_runs.append(FailedRun(run_id=run_id, name=ctx.run_map[run_id], logs=logs, failed_jobs=failed_jobs))
+        failed_runs.append(
+            FailedRun(
+                run_id=run_id,
+                name=ctx.run_map[run_id],
+                logs=logs,
+                failed_jobs=failed_jobs,
+            )
+        )
 
     return TemplateContext(
         repo=ctx.repo,
@@ -322,15 +466,22 @@ class RecentContext:
 def collect_recent(ctx: RecentContext) -> None:
     """Fetch recent failed runs across the repo and download their logs."""
     import shutil
+
     shutil.rmtree(ctx.outdir, ignore_errors=True)
     ctx.outdir.mkdir(parents=True, exist_ok=True)
 
     logger.info("==> Fetching recent failed runs for %s", ctx.repo)
     args = [
-        "run", "list", "--repo", ctx.repo,
-        "--status", "failure",
-        "--json", "databaseId,name,headBranch,headSha,displayTitle,workflowName,createdAt,url,event",
-        "--limit", str(ctx.limit),
+        "run",
+        "list",
+        "--repo",
+        ctx.repo,
+        "--status",
+        "failure",
+        "--json",
+        "databaseId,name,headBranch,headSha,displayTitle,workflowName,createdAt,url,event",
+        "--limit",
+        str(ctx.limit),
     ]
     if ctx.branch:
         args.extend(["--branch", ctx.branch])
@@ -355,11 +506,15 @@ def collect_recent(ctx: RecentContext) -> None:
 
         run_view = gh_json(
             ["run", "view", run_id, "--repo", ctx.repo, "--json", "jobs"],
-            default={}, allow_fail=True, retries=ctx.gh_retries,
+            default={},
+            allow_fail=True,
+            retries=ctx.gh_retries,
         )
         jobs = (run_view.get("jobs") or []) if isinstance(run_view, dict) else []
         write_json(run_dir / "jobs.json", jobs)
-        failed_jobs = [j for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"]
+        failed_jobs = [
+            j for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"
+        ]
 
         if not failed_jobs:
             return
@@ -371,8 +526,18 @@ def collect_recent(ctx: RecentContext) -> None:
                 continue
             logger.info("    Run %s, job '%s' (%s)", run_id, job_name, job_id)
             log = run_gh(
-                ["run", "view", run_id, "--repo", ctx.repo, "--job", job_id, "--log-failed"],
-                allow_fail=True, retries=ctx.gh_retries,
+                [
+                    "run",
+                    "view",
+                    run_id,
+                    "--repo",
+                    ctx.repo,
+                    "--job",
+                    job_id,
+                    "--log-failed",
+                ],
+                allow_fail=True,
+                retries=ctx.gh_retries,
             )
             text = log.stdout
             if log.returncode != 0 and log.stderr:
@@ -390,7 +555,11 @@ def collect_recent(ctx: RecentContext) -> None:
                 try:
                     future.result()
                 except Exception as exc:
-                    logger.warning("    Run %s: log download failed: %s", futures[future].get("databaseId"), exc)
+                    logger.warning(
+                        "    Run %s: log download failed: %s",
+                        futures[future].get("databaseId"),
+                        exc,
+                    )
 
 
 def build_recent_template_context(ctx: RecentContext) -> RecentTemplateContext:
@@ -400,30 +569,43 @@ def build_recent_template_context(ctx: RecentContext) -> RecentTemplateContext:
         if not run_id:
             continue
         run_dir = ctx.outdir / run_id
-        log_files = sorted(p for p in run_dir.glob("*.txt") if p.stat().st_size > 0) if run_dir.exists() else []
-        logs = [RunLog(path=make_cwd_relative(p), size_bytes=p.stat().st_size) for p in log_files]
+        log_files = (
+            sorted(p for p in run_dir.glob("*.txt") if p.stat().st_size > 0)
+            if run_dir.exists()
+            else []
+        )
+        logs = [
+            RunLog(path=make_cwd_relative(p), size_bytes=p.stat().st_size)
+            for p in log_files
+        ]
 
         failed_jobs: list[str] = []
         jobs_file = run_dir / "jobs.json"
         if jobs_file.exists():
             try:
                 jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
-                failed_jobs = [str(j.get("name") or "unknown") for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"]
+                failed_jobs = [
+                    str(j.get("name") or "unknown")
+                    for j in jobs
+                    if isinstance(j, dict) and j.get("conclusion") == "failure"
+                ]
             except (json.JSONDecodeError, OSError):
                 pass
 
-        failed_runs.append(RecentFailedRun(
-            run_id=run_id,
-            workflow_name=run.get("workflowName") or run.get("name") or "unknown",
-            display_title=run.get("displayTitle") or "",
-            branch=run.get("headBranch") or "",
-            head_sha=run.get("headSha") or "",
-            created_at=run.get("createdAt") or "",
-            event=run.get("event") or "",
-            url=run.get("url") or "",
-            logs=logs,
-            failed_jobs=failed_jobs,
-        ))
+        failed_runs.append(
+            RecentFailedRun(
+                run_id=run_id,
+                workflow_name=run.get("workflowName") or run.get("name") or "unknown",
+                display_title=run.get("displayTitle") or "",
+                branch=run.get("headBranch") or "",
+                head_sha=run.get("headSha") or "",
+                created_at=run.get("createdAt") or "",
+                event=run.get("event") or "",
+                url=run.get("url") or "",
+                logs=logs,
+                failed_jobs=failed_jobs,
+            )
+        )
 
     return RecentTemplateContext(
         repo=ctx.repo,
