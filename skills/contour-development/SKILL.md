@@ -372,18 +372,35 @@ Clean up: `make cleanup-kind`
 
 ## Run End-to-End Tests (Development Cluster)
 
-Run e2e tests against the scripts-based development cluster.
+The e2e framework builds Contour from source, runs it on the host, and deploys its own Envoy DaemonSet. Do NOT install `examples/render/contour.yaml` — it conflicts.
+
+One-time CRD setup:
 
 ```bash
-CONTOUR_E2E_LOCAL_HOST=127.0.0.101 make run-e2e
-CONTOUR_E2E_TEST_FOCUS="some test name" CONTOUR_E2E_LOCAL_HOST=127.0.0.101 make run-e2e
+kubectl apply -f examples/contour/01-crds.yaml
+kubectl apply -f examples/gateway/00-crds.yaml
 ```
 
-If tests fail mid-run and leave namespaces behind:
+Run a test with `runagent`:
 
 ```bash
-kubectl delete ns <test-namespace> --ignore-not-found
+HOST_IP=$(docker network inspect kind | jq -r '.[0].IPAM.Config[] | select(.Subnet | contains(":") | not) | .Gateway')
+
+runagent run -n e2e-test --cwd ~/work/contour \
+  --env CONTOUR_E2E_LOCAL_HOST=${HOST_IP} \
+  --env CONTOUR_E2E_HTTP_URL_BASE=http://127.0.0.101:80 \
+  --env CONTOUR_E2E_HTTPS_URL_BASE=https://127.0.0.101:443 \
+  -- go run github.com/onsi/ginkgo/v2/ginkgo -tags=e2e -vv -poll-progress-after=120s \
+  --focus "httpproxy-include-regex-condition" ./test/e2e/httpproxy/
+
+runagent wait e2e-test --timeout 600s
+runagent logs e2e-test --last 15
 ```
+
+- `CONTOUR_E2E_LOCAL_HOST` = Docker gateway IP (e.g. `172.18.0.1`) — Envoy inside cluster connects to host Contour via this.
+- `CONTOUR_E2E_HTTP(S)_URL_BASE` = `127.0.0.101:80/443` — test traffic to Envoy via Kind port mappings.
+
+If tests leave namespaces behind: `kubectl delete ns <test-namespace> --ignore-not-found`
 
 ---
 
