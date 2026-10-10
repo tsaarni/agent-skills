@@ -95,7 +95,19 @@ function compactHoverText(hoverText: string): string {
  * scripts receive this instead of the tool's text, so they can paginate and filter without
  * parsing prose.
  */
-export interface LspPage<Item = unknown> {
+/**
+ * A JSON value: what the SDK requires for a tool result's `structuredContent`. Declared here so
+ * the extension does not reach into a transitive package for a three-line type.
+ */
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly JsonValue[]
+  | { [key: string]: JsonValue };
+
+export type LspPage<Item extends JsonValue = JsonValue> = {
   /** False when the call failed; `error` then says why. */
   ok: boolean;
   error?: string;
@@ -111,11 +123,19 @@ export interface LspPage<Item = unknown> {
   hasMore: boolean;
   /** Offset to pass next; present only when `hasMore`. */
   nextOffset?: number;
-  /** Tool-specific fields, such as `totalReplacements` for rename. */
-  [key: string]: unknown;
-}
+  /** Rename and code-action tools: edits applied across all files. */
+  totalReplacements?: number;
+  /** Code-action tool: title and LSP kind of the applied action. */
+  actionTitle?: string;
+  appliedKind?: string;
+  /** Code-action tool: candidates as "<kind> | <title>" when the choice was ambiguous. */
+  available?: string[];
+  /** Rename tool: the name before and after. */
+  renamedFrom?: string;
+  renamedTo?: string;
+};
 
-export interface ToolResult<Item = unknown> {
+export interface ToolResult<Item extends JsonValue = JsonValue> {
   text: string;
   isError?: boolean;
   /** The `structuredContent` scripts receive; matches the tool's `outputSchema`. */
@@ -123,7 +143,11 @@ export interface ToolResult<Item = unknown> {
 }
 
 /** Page a full result list: a slice plus the fields a script needs to fetch the rest. */
-function paginate<Item>(all: Item[], offset: number | undefined, limit: number): LspPage<Item> {
+function paginate<Item extends JsonValue>(
+  all: Item[],
+  offset: number | undefined,
+  limit: number,
+): LspPage<Item> {
   const start = Math.max(1, offset ?? 1);
   const items = all.slice(start - 1, start - 1 + limit);
   const hasMore = start - 1 + items.length < all.length;
@@ -139,7 +163,7 @@ function paginate<Item>(all: Item[], offset: number | undefined, limit: number):
 }
 
 /** A successful but empty result, for "not found" rather than a failure. */
-function empty<Item>(message?: string): LspPage<Item> {
+function empty<Item extends JsonValue = JsonValue>(message?: string): LspPage<Item> {
   return {
     ok: true,
     ...(message ? { message } : {}),
@@ -161,7 +185,7 @@ export function failure(text: string, error: string): ToolResult<never> {
 }
 
 /** The "showing X-Y of N" trailer shared by the paged tools. */
-function pageTrailer(page: LspPage<unknown>, suffix = "."): string {
+function pageTrailer(page: LspPage<JsonValue>, suffix = "."): string {
   const shown = `${page.offset}-${page.offset + page.items.length - 1} of ${page.total}`;
   if (page.hasMore) {
     return `\n\nShowing matches ${shown}${suffix} Use offset: ${page.nextOffset} to get more.`;

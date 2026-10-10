@@ -1,3 +1,6 @@
+# Build scripts are denied: esbuild gets its binary from the @esbuild/* optional
+# dependencies, and the other two need no build step to be imported.
 allowBuilds:
-  '@google/genai': set this to true or false
-  protobufjs: set this to true or false
+  '@google/genai': false
+  esbuild: false
+  protobufjs: false

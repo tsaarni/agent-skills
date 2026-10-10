@@ -22,11 +22,6 @@ export function pathToUri(workspaceDir: string, filePath: string): string {
   return pathToFileURL(absolutePath).href;
 }
 
-// Convert a file:// URL string back to an absolute file path
-export function uriToPath(uri: string): string {
-  return fileURLToPath(uri);
-}
-
 const DEFAULT_LANGUAGE_IDS: Record<string, string> = {
   ".ts": "typescript",
   ".tsx": "typescript",
@@ -131,20 +126,22 @@ export interface DiagnosticInfo {
   };
 }
 
-export interface LocationInfo {
+/** A place a language server reported, as 1-indexed coordinates. */
+export type LocationInfo = {
   filePath: string;
   line: number;
   character: number;
-}
+};
 
-export interface SymbolInfo {
+/** A symbol a document or workspace search reported. */
+export type SymbolInfo = {
   name: string;
   kind: string;
   line: number;
   detail?: string;
   containerName?: string;
   filePath?: string;
-}
+};
 
 export interface FormattedDiagnostic {
   severity: string;
@@ -152,12 +149,6 @@ export interface FormattedDiagnostic {
   character: number;
   message: string;
 }
-
-interface LanguageAdapter {
-  triggerDiagnostics?: (endpoint: LspJSONRPCEndpoint, absolutePath: string) => Promise<void>;
-}
-
-const LANGUAGE_ADAPTERS: Record<string, LanguageAdapter> = {};
 
 export class LspClientManager {
   private process: ChildProcess | null = null;
@@ -1230,40 +1221,17 @@ export class LspClientManager {
   }
 
   /**
-   * Triggers diagnostics compilation for the workspace.
-   * Adapts dynamically for lazy servers (e.g. TypeScript).
+   * Wakes a lazy server (TypeScript, gopls) by opening one document, so it starts analysing
+   * the workspace. A requested file or an already opened document is enough; otherwise the
+   * first file with a known extension is opened.
    */
   async triggerWorkspaceDiagnostics(filePath?: string): Promise<void> {
-    if (!this.isServerRunning() || !this.endpoint) return;
+    if (!this.isServerRunning()) return;
+    if (filePath || this.openedFiles.size > 0) return;
 
-    let target = filePath;
-    if (!target) {
-      const openedUri = this.openedFiles.values().next().value;
-      if (openedUri) {
-        target = uriToPath(openedUri);
-      }
-    }
-
-    if (!target) {
-      const firstFile = await this.findFirstWorkspaceFile();
-      if (firstFile) {
-        await this.syncFile(firstFile);
-        target = firstFile;
-      }
-    }
-
-    if (!target) return;
-
-    const absolutePath = path.isAbsolute(target) ? target : path.resolve(this.workspaceDir, target);
-    const langId = getLanguageId(absolutePath, this.config);
-
-    const adapter = LANGUAGE_ADAPTERS[langId];
-    if (adapter?.triggerDiagnostics) {
-      try {
-        await adapter.triggerDiagnostics(this.endpoint, absolutePath);
-      } catch (err) {
-        console.warn(`[LSP Client] Diagnostics trigger failed for ${langId}:`, err);
-      }
+    const firstFile = await this.findFirstWorkspaceFile();
+    if (firstFile) {
+      await this.syncFile(firstFile);
     }
   }
 }

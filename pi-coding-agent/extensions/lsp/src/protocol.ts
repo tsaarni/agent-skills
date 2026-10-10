@@ -255,10 +255,6 @@ export class LspClient {
     this.endpoint.notify("textDocument/didOpen", params);
   }
 
-  didClose(params: unknown): void {
-    this.endpoint.notify("textDocument/didClose", params);
-  }
-
   hover(params: unknown): Promise<LSPHover | null> {
     return this.endpoint.send<LSPHover | null>("textDocument/hover", params);
   }

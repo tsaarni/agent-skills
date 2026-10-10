@@ -305,16 +305,29 @@ export default function lspExtension(pi: ExtensionAPI) {
       }
 
       if (subCommand === "clean") {
-        const globalConfigPath = getLspProjectConfigPath(ctx.cwd);
+        // Both configs: the project one wins over the global one, so removing only the global
+        // config would leave the workspace autostarting exactly as before.
+        const configPaths = [
+          join(ctx.cwd, CONFIG_DIR_NAME, "lsp.json"),
+          getLspProjectConfigPath(ctx.cwd),
+        ];
         try {
-          await fs.rm(globalConfigPath, { force: true });
+          for (const configPath of configPaths) {
+            await fs.rm(configPath, { force: true });
+          }
           if (lspManager.isServerRunning()) {
             await lspManager.stop();
           }
-          ctx.ui.notify("Global LSP configuration removed.", "info");
+          ctx.ui.notify(`LSP configuration removed:\n${configPaths.join("\n")}`, "info");
+          sendLspStatus(pi, {
+            language: "",
+            command: "",
+            args: [],
+            status: "not_initialized",
+          });
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
-          ctx.ui.notify(`Failed to remove global configuration: ${error.message}`, "error");
+          ctx.ui.notify(`Failed to remove LSP configuration: ${error.message}`, "error");
         }
         return;
       }

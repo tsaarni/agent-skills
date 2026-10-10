@@ -127,7 +127,7 @@ Prefer a server globally, in every workspace, by raising its `priority` in `lsp-
 |---|---|
 | `/lsp` or `/lsp status` | Status line with language, pid, synced file count and error/warning totals, plus up to five files with details. Reports "not initialized" when no configuration exists. |
 | `/lsp init` | Detect the language, ask for confirmation, save the choice to the **global** config, start the server and register the tools. |
-| `/lsp clean` | Delete the **global** config and stop the server. A project-local `.pi/lsp.json` is left untouched. |
+| `/lsp clean` | Delete both configs, the project-local `.pi/lsp.json` and the global one, and stop the server. |
 | `/lsp restart` | Stop and start the server using the current configuration. |
 
 ## Tools

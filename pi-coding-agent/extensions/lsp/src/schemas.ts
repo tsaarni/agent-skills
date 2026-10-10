@@ -91,7 +91,8 @@ export const SymbolsOutput = paged(SymbolDeclaration);
 export const DiagnosticsOutput = paged(Diagnostic);
 /** A code-action request: file edits applied, or the candidates when the choice is ambiguous. */
 export const CodeActionOutput = paged(FileChange, {
-  totalReplacements: Type.Number({ description: "Edits applied across all files." }),
+  // Absent when the request only lists candidates, or when the action needs server-side execution.
+  totalReplacements: Type.Optional(Type.Number({ description: "Edits applied across all files." })),
   actionTitle: Type.Optional(Type.String({ description: "Title of the applied action." })),
   appliedKind: Type.Optional(Type.String({ description: "LSP kind of the applied action." })),
   available: Type.Optional(
