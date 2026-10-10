@@ -12,7 +12,7 @@
     "lint": "biome lint .",
     "check": "biome check .",
     "check:fix": "biome check --fix .",
-    "test": "npx tsx --test tests/**/*.test.ts"
+    "test": "tsx --test tests/*.test.ts"
   },
   "pi": {
     "extensions": [
@@ -20,8 +20,8 @@
     ]
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.2",
-    "@earendil-works/pi-tui": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-tui": "^1.1.0",
     "json-rpc-2.0": "^1.7.1",
     "typebox": "^1.1.38"
   },

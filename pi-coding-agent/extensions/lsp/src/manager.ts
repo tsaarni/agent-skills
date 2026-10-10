@@ -1,10 +1,14 @@
 // Manages the language server process, file syncing, and diagnostics.
 import { type ChildProcess, spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { IGNORE_DIRS, type ServersConfig } from "./detector.js";
 import {
+  type LSPCodeAction,
+  type LSPCommand,
+  type LSPDiagnostic,
   type LSPSymbol,
   type LSPTextEdit,
   type LSPWorkspaceEdit,
@@ -35,10 +39,22 @@ const DEFAULT_LANGUAGE_IDS: Record<string, string> = {
   ".py": "python",
   ".go": "go",
   ".rs": "rust",
+  ".json": "json",
+  ".jsonc": "jsonc",
+  ".css": "css",
 };
 
 export function getLanguageId(filePath: string, config?: ServersConfig | null): string {
   const ext = path.extname(filePath).toLowerCase();
+
+  // Canonical LSP language IDs win over config keys: a config key names the language
+  // server (e.g. "biome"), while the server itself still expects standard IDs such as
+  // "typescript" or "json" in textDocument/didOpen.
+  const builtin = DEFAULT_LANGUAGE_IDS[ext];
+  if (builtin) {
+    return builtin;
+  }
+
   if (config?.languages) {
     for (const [langId, langConfig] of Object.entries(config.languages)) {
       if (langConfig.detection.extensions.includes(ext)) {
@@ -46,7 +62,30 @@ export function getLanguageId(filePath: string, config?: ServersConfig | null): 
       }
     }
   }
-  return DEFAULT_LANGUAGE_IDS[ext] || "plaintext";
+  return "plaintext";
+}
+
+/**
+ * Resolve the language server executable.
+ *
+ * - Paths are resolved against the workspace directory.
+ * - Bare command names look in the workspace-local `node_modules/.bin` first, so a
+ *   project-pinned server (e.g. Biome, which is usually a devDependency) wins over a
+ *   globally installed binary, and then fall back to the regular PATH lookup done by spawn.
+ */
+export async function resolveServerCommand(command: string, workspaceDir: string): Promise<string> {
+  if (command.includes(path.sep) || path.isAbsolute(command)) {
+    return path.isAbsolute(command) ? command : path.resolve(workspaceDir, command);
+  }
+
+  const localBin = path.join(workspaceDir, "node_modules", ".bin", command);
+  try {
+    await fs.access(localBin, fsConstants.X_OK);
+    return localBin;
+  } catch {
+    // Not installed locally or not executable: let spawn resolve it from PATH
+    return command;
+  }
 }
 
 const SYMBOL_KINDS = [
@@ -208,11 +247,14 @@ export class LspClientManager {
     this.documentVersions.clear();
     this.syncQueue.clear();
 
+    let resolvedCommand = command;
     try {
       const env = { ...process.env };
       delete env.NODE_OPTIONS;
 
-      this.process = spawn(command, args, {
+      resolvedCommand = await resolveServerCommand(command, this.workspaceDir);
+
+      this.process = spawn(resolvedCommand, args, {
         cwd: this.workspaceDir,
         env,
         stdio: ["pipe", "pipe", "pipe"],
@@ -226,8 +268,19 @@ export class LspClientManager {
         console.error(`[LSP Server Stderr] ${data.toString().trim()}`);
       });
 
-      // Avoid blocking process exits
+      // Detach immediately: a server process that outlives a failed startup must never keep
+      // the host process (or a test runner) alive.
       this.process.unref();
+
+      // Fail fast when the binary is missing or not executable instead of hanging on the
+      // initialize request until the request timeout expires.
+      const spawned = this.process;
+      await new Promise<void>((resolve, reject) => {
+        spawned.once("spawn", () => resolve());
+        spawned.once("error", (err) => {
+          reject(err);
+        });
+      });
 
       if (!this.process.stdin || !this.process.stdout) {
         throw new Error("LSP process spawned without stdin or stdout pipes.");
@@ -414,7 +467,15 @@ export class LspClientManager {
       });
     } catch (error) {
       this.isConnected = false;
-      throw new Error(`Failed to start language server (${command}): ${error}`);
+      // Never leak a half-started server: a server that exits during initialize (or one that
+      // stays alive without a usable connection) would otherwise linger for the session.
+      if (this.process) {
+        this.process.kill("SIGKILL");
+        this.process = null;
+      }
+      this.endpoint = null;
+      this.client = null;
+      throw new Error(`Failed to start language server (${resolvedCommand}): ${error}`);
     }
   }
 
@@ -883,6 +944,82 @@ export class LspClientManager {
     );
 
     return result;
+  }
+
+  /**
+   * Request code actions (quick fixes, format, organize imports, refactors) for a range.
+   *
+   * The range matters: servers such as Biome reject a range that reaches past the end of the
+   * document, so a whole-document request is clamped to the last line. `kind` is passed to
+   * the server as `context.only` and results are additionally filtered locally, so parent
+   * kinds like `quickfix` or `source` work even when a server filters strictly.
+   */
+  async requestCodeActions(
+    filePath: string,
+    kind?: string,
+    line?: number,
+  ): Promise<(LSPCodeAction | LSPCommand)[]> {
+    if (!this.isServerRunning() || !this.client || !this.endpoint) {
+      throw new Error("Language server is not running");
+    }
+
+    await this.syncFile(filePath);
+
+    const absolutePath = path.isAbsolute(filePath)
+      ? filePath
+      : path.resolve(this.workspaceDir, filePath);
+    const uri = pathToUri(this.workspaceDir, filePath);
+
+    const content = await fs.readFile(absolutePath, "utf8");
+    const lines = content.split("\n");
+    const lastLine = Math.max(0, lines.length - 1);
+
+    const range = line
+      ? {
+          start: { line: Math.max(0, line - 1), character: 0 },
+          end: { line: Math.max(0, line - 1), character: (lines[line - 1] ?? "").length },
+        }
+      : {
+          start: { line: 0, character: 0 },
+          end: { line: lastLine, character: (lines[lastLine] ?? "").length },
+        };
+
+    const timeout = this.config?.defaultTimeoutMs ?? 15000;
+    const client = this.client;
+
+    const send = async (): Promise<(LSPCodeAction | LSPCommand)[]> => {
+      const raw = await this.executeWithTimeout(
+        client.codeAction({
+          textDocument: { uri },
+          range,
+          context: {
+            diagnostics: (this.diagnostics.get(uri) ?? []) as LSPDiagnostic[],
+            ...(kind ? { only: [kind] } : {}),
+          },
+        }),
+        timeout,
+        `Code-action request timed out after ${timeout / 1000} seconds`,
+      );
+      return (raw ?? []) as (LSPCodeAction | LSPCommand)[];
+    };
+
+    let actions = await send();
+
+    // Servers analyse asynchronously: a request that arrives right after a didOpen/didChange
+    // (or before the first publishDiagnostics) legitimately comes back empty. Wait for the
+    // server to report on the file and ask once more before concluding there is nothing.
+    if (actions.length === 0) {
+      await this.waitForDiagnostics(filePath, 2000);
+      actions = await send();
+    }
+
+    if (!kind) return actions;
+
+    return actions.filter((action) => {
+      const actionKind = (action as LSPCodeAction).kind;
+      if (!actionKind) return false;
+      return actionKind === kind || actionKind.startsWith(`${kind}.`);
+    });
   }
 
   /**

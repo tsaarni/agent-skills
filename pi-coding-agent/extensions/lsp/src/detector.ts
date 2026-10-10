@@ -5,6 +5,13 @@ import * as path from "node:path";
 export interface LanguageConfig {
   command: string;
   args: string[];
+  /**
+   * Tie-breaker for detection when several languages match. Among languages that match at
+   * least one signature file (or that have files in the workspace), the one with the
+   * highest priority wins; matches then break remaining ties. Defaults to 0, which keeps
+   * the historical behavior of "first fully matching entry in lsp-config.json wins".
+   */
+  priority?: number;
   detection: {
     files: string[];
     extensions: string[];
@@ -40,6 +47,7 @@ async function checkRootFiles(workspaceDir: string, config: ServersConfig): Prom
     const fileSet = new Set(rootFiles);
 
     let bestLang: string | null = null;
+    let bestPriority = Number.NEGATIVE_INFINITY;
     let maxMatchCount = 0;
 
     for (const [langName, langConfig] of Object.entries(config.languages)) {
@@ -50,9 +58,13 @@ async function checkRootFiles(workspaceDir: string, config: ServersConfig): Prom
         }
       }
 
-      if (matches > maxMatchCount) {
-        maxMatchCount = matches;
+      if (matches === 0) continue;
+
+      const priority = langConfig.priority ?? 0;
+      if (priority > bestPriority || (priority === bestPriority && matches > maxMatchCount)) {
         bestLang = langName;
+        bestPriority = priority;
+        maxMatchCount = matches;
       }
     }
 
@@ -94,6 +106,7 @@ async function scanExtensions(workspaceDir: string, config: ServersConfig): Prom
 
   // Map file extension back to language configs
   let bestLang: string | null = null;
+  let bestPriority = Number.NEGATIVE_INFINITY;
   let maxScore = 0;
 
   for (const [langName, langConfig] of Object.entries(config.languages)) {
@@ -102,13 +115,17 @@ async function scanExtensions(workspaceDir: string, config: ServersConfig): Prom
       score += extensionCounts[ext] || 0;
     }
 
-    if (score > maxScore) {
-      maxScore = score;
+    if (score === 0) continue;
+
+    const priority = langConfig.priority ?? 0;
+    if (priority > bestPriority || (priority === bestPriority && score > maxScore)) {
       bestLang = langName;
+      bestPriority = priority;
+      maxScore = score;
     }
   }
 
-  return maxScore > 0 ? bestLang : null;
+  return bestLang;
 }
 
 /**

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 
 import { CONFIG_DIR_NAME, type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 import {
   buildLspStatusMarkdown,
   type LspStatus,
@@ -15,11 +15,22 @@ import {
 import { detectWorkspaceLanguage } from "./detector.js";
 import { LspClientManager } from "./manager.js";
 import {
+  CodeActionOutput,
+  DiagnosticsOutput,
+  ReferencesOutput,
+  RenameOutput,
+  SymbolInfoOutput,
+  SymbolsOutput,
+} from "./schemas.js";
+import {
+  applyCodeAction,
+  failure,
   findReferences,
   getDiagnostics,
   getSymbolInfo,
   renameSymbol,
   searchSymbols,
+  type ToolResult,
 } from "./tools.js";
 
 export type { LspStatus };
@@ -341,12 +352,46 @@ export default function lspExtension(pi: ExtensionAPI) {
       );
     },
   });
-
 }
 
+/**
+ * Register every LSP tool.
+ *
+ * One wrapper builds all of them. It declares the tool's `outputSchema`, guards on a running
+ * language server, and returns the function's structured result as both `structuredContent`
+ * (what codemode scripts receive) and `details`. A tool that declares `outputSchema` resolves
+ * to `structuredContent` in scripts even on errors, so a script branches on `ok` instead of
+ * catching, and `Promise.all` over many calls stays simple.
+ */
 export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClientManager | null) {
+  const register = <P extends TSchema>(def: {
+    name: string;
+    label: string;
+    description: string;
+    parameters: P;
+    outputSchema: TSchema;
+    run: (manager: LspClientManager, cwd: string, params: Static<P>) => Promise<ToolResult>;
+  }): void => {
+    pi.registerTool({
+      name: def.name,
+      label: def.label,
+      description: def.description,
+      parameters: def.parameters,
+      outputSchema: def.outputSchema,
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        const manager = getLspManager();
+        if (!manager?.isServerRunning()) {
+          return toToolResponse(
+            failure("Error: Language server is not running.", "language server is not running"),
+          );
+        }
+        return toToolResponse(await def.run(manager, ctx.cwd, params as Static<P>));
+      },
+    });
+  };
+
   // Tool: lsp_get_symbol_info - query hover definition and code snippets for a symbol
-  pi.registerTool({
+  register({
     name: "lsp_get_symbol_info",
     label: "LSP: Get Symbol Info",
     description:
@@ -364,33 +409,12 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const lspManager = getLspManager();
-      if (!lspManager?.isServerRunning()) {
-        return {
-          content: [{ type: "text", text: "Error: Language server is not running." }],
-          isError: true,
-          details: {},
-        };
-      }
-
-      const res = await getSymbolInfo(
-        lspManager,
-        ctx.cwd,
-        params.filePath,
-        params.symbolName,
-        params.line,
-      );
-      return {
-        content: [{ type: "text", text: res.text }],
-        isError: res.isError,
-        details: res.details ?? {},
-      };
-    },
+    outputSchema: SymbolInfoOutput,
+    run: (manager, cwd, p) => getSymbolInfo(manager, cwd, p.filePath, p.symbolName, p.line),
   });
 
   // Tool: lsp_find_references - search for all references to a symbol across files
-  pi.registerTool({
+  register({
     name: "lsp_find_references",
     label: "LSP: Find References",
     description: "Finds all references and usages of a symbol across the workspace.",
@@ -412,34 +436,13 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const lspManager = getLspManager();
-      if (!lspManager?.isServerRunning()) {
-        return {
-          content: [{ type: "text", text: "Error: Language server is not running." }],
-          isError: true,
-          details: {},
-        };
-      }
-
-      const res = await findReferences(
-        lspManager,
-        ctx.cwd,
-        params.filePath,
-        params.symbolName,
-        params.line,
-        params.offset,
-      );
-      return {
-        content: [{ type: "text", text: res.text }],
-        isError: res.isError,
-        details: res.details ?? {},
-      };
-    },
+    outputSchema: ReferencesOutput,
+    run: (manager, cwd, p) =>
+      findReferences(manager, cwd, p.filePath, p.symbolName, p.line, p.offset),
   });
 
   // Tool: lsp_search_symbols - find files containing symbol definitions or list outline
-  pi.registerTool({
+  register({
     name: "lsp_search_symbols",
     label: "LSP: Search / List Symbols",
     description:
@@ -462,33 +465,12 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const lspManager = getLspManager();
-      if (!lspManager?.isServerRunning()) {
-        return {
-          content: [{ type: "text", text: "Error: Language server is not running." }],
-          isError: true,
-          details: {},
-        };
-      }
-
-      const res = await searchSymbols(
-        lspManager,
-        ctx.cwd,
-        params.filePath,
-        params.query,
-        params.offset,
-      );
-      return {
-        content: [{ type: "text", text: res.text }],
-        isError: res.isError,
-        details: res.details ?? {},
-      };
-    },
+    outputSchema: SymbolsOutput,
+    run: (manager, cwd, p) => searchSymbols(manager, cwd, p.filePath, p.query, p.offset),
   });
 
   // Tool: lsp_get_diagnostics - query compiler / linter messages in workspace or for a specific file
-  pi.registerTool({
+  register({
     name: "lsp_get_diagnostics",
     label: "LSP: Get Diagnostics",
     description:
@@ -506,27 +488,12 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const lspManager = getLspManager();
-      if (!lspManager?.isServerRunning()) {
-        return {
-          content: [{ type: "text", text: "Error: Language server is not running." }],
-          isError: true,
-          details: {},
-        };
-      }
-
-      const res = await getDiagnostics(lspManager, ctx.cwd, params.filePath, params.offset);
-      return {
-        content: [{ type: "text", text: res.text }],
-        isError: res.isError,
-        details: res.details ?? {},
-      };
-    },
+    outputSchema: DiagnosticsOutput,
+    run: (manager, cwd, p) => getDiagnostics(manager, cwd, p.filePath, p.offset),
   });
 
   // Tool: lsp_rename_symbol - rename a symbol and apply workspace edit automatically
-  pi.registerTool({
+  register({
     name: "lsp_rename_symbol",
     label: "LSP: Rename Symbol",
     description:
@@ -547,29 +514,52 @@ export function registerLspTools(pi: ExtensionAPI, getLspManager: () => LspClien
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const lspManager = getLspManager();
-      if (!lspManager?.isServerRunning()) {
-        return {
-          content: [{ type: "text", text: "Error: Language server is not running." }],
-          isError: true,
-          details: {},
-        };
-      }
-
-      const res = await renameSymbol(
-        lspManager,
-        ctx.cwd,
-        params.filePath,
-        params.symbolName,
-        params.newName,
-        params.line,
-      );
-      return {
-        content: [{ type: "text", text: res.text }],
-        isError: res.isError,
-        details: res.details ?? {},
-      };
-    },
+    outputSchema: RenameOutput,
+    run: (manager, cwd, p) =>
+      renameSymbol(manager, cwd, p.filePath, p.symbolName, p.newName, p.line),
   });
+
+  // Tool: lsp_apply_code_action - apply a quick fix, format or organize-imports action
+  register({
+    name: "lsp_apply_code_action",
+    label: "LSP: Apply Code Action",
+    description:
+      "Applies a code action offered by the language server: quick fix, format document (source.fixAll), organize imports (source.organizeImports) or refactor. Use it after lsp_get_diagnostics to fix what was reported. Pass kind to select a whole class of actions (for example source.fixAll.biome) and title to pick one specific action; when several match, the candidates are listed instead of guessing.",
+    parameters: Type.Object({
+      filePath: Type.String({
+        description: "Path to the file to apply the code action to.",
+      }),
+      kind: Type.Optional(
+        Type.String({
+          description:
+            "LSP code-action kind to apply, exact or parent (e.g. quickfix, source.fixAll, source.fixAll.biome, source.organizeImports.biome, refactor).",
+        }),
+      ),
+      title: Type.Optional(
+        Type.String({
+          description: "Case-insensitive substring of the action title, to pick one action.",
+        }),
+      ),
+      line: Type.Optional(
+        Type.Integer({
+          description: "1-indexed line to scope the request to (default: whole file).",
+        }),
+      ),
+    }),
+    outputSchema: CodeActionOutput,
+    run: (manager, cwd, p) => applyCodeAction(manager, cwd, p.filePath, p.kind, p.line, p.title),
+  });
+}
+
+/**
+ * Shape one tool result for the agent: the model gets the text, codemode scripts and the TUI
+ * get the structured page. `isError` still marks failures so the model sees them.
+ */
+function toToolResponse(res: ToolResult) {
+  return {
+    content: [{ type: "text" as const, text: res.text }],
+    structuredContent: res.structured,
+    details: res.structured,
+    ...(res.isError ? { isError: true as const } : {}),
+  };
 }

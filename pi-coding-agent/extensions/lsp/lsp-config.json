@@ -64,6 +64,14 @@
         "files": ["compile_commands.json", "compile_flags.txt", "CMakeLists.txt"],
         "extensions": [".cpp", ".c", ".h", ".hpp", ".cc", ".cxx", ".hxx"]
       }
+    },
+    "biome": {
+      "command": "biome",
+      "args": ["lsp-proxy"],
+      "detection": {
+        "files": ["biome.json", "biome.jsonc"],
+        "extensions": [".json", ".jsonc", ".css"]
+      }
     }
   }
 }

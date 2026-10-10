@@ -92,6 +92,33 @@ export interface LSPWorkspaceEdit {
   documentChanges?: LSPTextDocumentEdit[];
 }
 
+export interface LSPDiagnostic {
+  range: LSPRange;
+  severity?: number;
+  message: string;
+  source?: string;
+  code?: string | number;
+}
+
+export interface LSPCommand {
+  title: string;
+  command: string;
+  arguments?: unknown[];
+}
+
+/**
+ * A code action. Servers return either an `edit` that the client applies itself (Biome,
+ * tsserver) or a `command` that has to be executed on the server (clangd, gopls).
+ */
+export interface LSPCodeAction {
+  title: string;
+  kind?: string;
+  diagnostics?: LSPDiagnostic[];
+  edit?: LSPWorkspaceEdit;
+  command?: LSPCommand;
+  isPreferred?: boolean;
+}
+
 export interface LSPSymbol {
   name: string;
   kind: number;
@@ -246,5 +273,12 @@ export class LspClient {
 
   documentSymbol(params: unknown): Promise<LSPSymbol[] | null> {
     return this.endpoint.send<LSPSymbol[] | null>("textDocument/documentSymbol", params);
+  }
+
+  codeAction(params: unknown): Promise<(LSPCodeAction | LSPCommand)[] | null> {
+    return this.endpoint.send<(LSPCodeAction | LSPCommand)[] | null>(
+      "textDocument/codeAction",
+      params,
+    );
   }
 }

@@ -46,17 +46,47 @@ async function pollUntilReady(
   throw new Error(`LSP server not ready for ${filePath} after ${timeoutMs}ms`);
 }
 
+const extensionDir = path.resolve(__dirname, "..");
+
+/**
+ * Give the temp workspace its own `node_modules/<name>` symlink to the dependency installed in
+ * this package, mirroring the pnpm layout of the repo (`node_modules/<name> -> .pnpm/<name>@<v>/…`).
+ *
+ * Some servers resolve a workspace-local toolchain instead of bundling one:
+ * `typescript-language-server` refuses to start with "Could not find a valid TypeScript
+ * installation" unless `typescript` is resolvable from the workspace under test.
+ */
+async function linkWorkspaceDependency(workspaceDir: string, name: string): Promise<void> {
+  const source = path.join(extensionDir, "node_modules", name);
+  const target = path.join(workspaceDir, "node_modules", name);
+  try {
+    const realSource = await fs.realpath(source);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.symlink(realSource, target);
+  } catch (err) {
+    throw new Error(
+      `Cannot link workspace dependency "${name}" from ${source}: ${(err as Error).message}. ` +
+        "Install the package dependencies (pnpm install) before running the tests.",
+    );
+  }
+}
+
 async function setupWorkspace(
   lang: "go" | "ts" | "cpp",
   files: Record<string, string>,
   serverCmd: string,
   serverArgs: string[],
   mainFile: string,
+  dependencies: string[] = [],
 ): Promise<TestWorkspace> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `pi-lsp-${lang}-test-`));
 
   for (const [name, content] of Object.entries(files)) {
     await fs.writeFile(path.join(tempDir, name), content, "utf8");
+  }
+
+  for (const dependency of dependencies) {
+    await linkWorkspaceDependency(tempDir, dependency);
   }
 
   const manager = new LspClientManager(tempDir, config);
@@ -206,19 +236,23 @@ func main() {
     await fs.writeFile(path.join(tempDir, "main.go"), badGo, "utf8");
 
     const manager = new LspClientManager(tempDir, config);
-    await manager.start("gopls", []);
+    // Clean up the throwaway workspace and the server even when an assertion fails, so a
+    // failing run does not leave a stray temp directory and a running language server.
+    try {
+      await manager.start("gopls", []);
 
-    // Call getDiagnostics workspace-wide without syncing files first
-    const result = await getDiagnostics(manager, tempDir);
+      // Call getDiagnostics workspace-wide without syncing files first
+      const result = await getDiagnostics(manager, tempDir);
 
-    assert.equal(result.isError, undefined);
-    assert.ok(
-      result.text.includes("main.go"),
-      "Output should report startup error in main.go without manual syncFile",
-    );
-
-    await manager.stop();
-    await fs.rm(tempDir, { recursive: true, force: true });
+      assert.equal(result.isError, undefined);
+      assert.ok(
+        result.text.includes("main.go"),
+        "Output should report startup error in main.go without manual syncFile",
+      );
+    } finally {
+      await manager.stop();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("lsp_rename_symbol", async () => {
@@ -267,6 +301,8 @@ export { res };
       "typescript-language-server",
       ["--stdio"],
       "main.ts",
+      // The server looks for the workspace toolchain; the temp workspace has no dependencies.
+      ["typescript"],
     );
   });
 
@@ -358,20 +394,25 @@ export { res };
     const badTs = 'const x: number = "hello";\n';
     await fs.writeFile(path.join(tempDir, "main.ts"), badTs, "utf8");
 
+    // Same as setupWorkspace: the server needs `typescript` resolvable from the workspace.
+    await linkWorkspaceDependency(tempDir, "typescript");
+
     const manager = new LspClientManager(tempDir, config);
-    await manager.start("typescript-language-server", ["--stdio"]);
+    try {
+      await manager.start("typescript-language-server", ["--stdio"]);
 
-    // Call getDiagnostics workspace-wide without syncing files first
-    const result = await getDiagnostics(manager, tempDir);
+      // Call getDiagnostics workspace-wide without syncing files first
+      const result = await getDiagnostics(manager, tempDir);
 
-    assert.equal(result.isError, undefined);
-    assert.ok(
-      result.text.includes("main.ts"),
-      "Output should report startup error in main.ts without manual syncFile",
-    );
-
-    await manager.stop();
-    await fs.rm(tempDir, { recursive: true, force: true });
+      assert.equal(result.isError, undefined);
+      assert.ok(
+        result.text.includes("main.ts"),
+        "Output should report startup error in main.ts without manual syncFile",
+      );
+    } finally {
+      await manager.stop();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("lsp_rename_symbol", async () => {
