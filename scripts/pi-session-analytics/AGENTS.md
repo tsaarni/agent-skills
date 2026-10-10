@@ -1,6 +1,6 @@
 # Pi Session Analytics: Agent Operating Guide
 
-Operating instructions for AI coding agents auditing Pi session logs using `analyze.py`.
+Operating instructions for AI coding agents auditing Pi session logs using `go run .`.
 
 ---
 
@@ -8,14 +8,12 @@ Operating instructions for AI coding agents auditing Pi session logs using `anal
 
 When asked to audit a session, check costs, review developer habits, or diagnose an API failure:
 
-1. **Never parse raw `.jsonl` files manually.** Always run `analyze.py`—it resolves the conversation DAG, prunes abandoned branches, tracks cache state transitions across errors, and calculates exact cost and token metrics.
-2. **Execution Safety**: `analyze.py` is read-only and safe to execute on active, running sessions.
-3. **Command Invocation**:
+1. **Never parse raw `.jsonl` files manually.** Always run `go run .`—it resolves the conversation DAG, prunes abandoned branches, tracks cache state transitions across errors, and calculates exact cost and token metrics.
+2. **Execution Safety**: the analyzer is read-only and safe to execute on active, running sessions.
+3. **Command Invocation** (run from this directory):
    ```bash
-   # Run via uv (preferred) or python3:
-   uv run <path-to>/analyze.py [target] [presentation modifiers]
-   # or
-   python3 <path-to>/analyze.py [target] [presentation modifiers]
+   cd <path-to>/pi-session-analytics
+   go run . [target] [presentation modifiers]
    ```
 4. **Target Selection vs. Presentation Modifiers**:
    * **Targets**: Target a single session (e.g. `1`, `<UUID>`, `--latest`, `-g`) OR a time window (`--today`, `--yesterday`, `--since`).
@@ -35,36 +33,39 @@ Map the user's intent to the appropriate command:
 | User Intent / Request | Command |
 |---|---|
 | **Discovery & Navigation** | |
-| "List recent sessions" / "What ran today?" | `analyze.py -l` |
-| "Show failing sessions" / "List errors" | `analyze.py -l --errors-only` |
-| "Filter sessions to a specific project" | `analyze.py -l --workspace /path/to/project` |
-| "Show all workspace projects" | `analyze.py --workspaces` |
-| "Audit all-time habits and model usage" | `analyze.py --habits` |
+| "List recent sessions" / "What ran today?" | `go run . -l` |
+| "Show failing sessions" / "List errors" | `go run . -l --errors-only` |
+| "Filter sessions to a specific project" | `go run . -l --workspace /path/to/project` |
+| "Show all workspace projects" | `go run . --workspaces` |
+| "Audit all-time habits and model usage" | `go run . --habits` |
 | **Single Session Audits** | |
-| "Audit current workspace session" / "Check costs" | `analyze.py` (or `analyze.py --latest`) |
-| "Audit latest session machine-wide" | `analyze.py -g` (or `analyze.py --latest -g`) |
-| "Analyze session #N from the list" | `analyze.py N` (e.g. `analyze.py 1` for latest listed) |
-| "Analyze session by UUID" | `analyze.py <UUID_PREFIX>` (e.g. `analyze.py 01a08446`) |
-| "Audit specific session file" | `analyze.py ~/.pi/agent/sessions/<workspace-hash>/session.jsonl` |
+| "Audit current workspace session" / "Check costs" | `go run .` (or `go run . --latest`) |
+| "Audit latest session machine-wide" | `go run . -g` (or `go run . --latest -g`) |
+| "Analyze session #N from the list" | `go run . N` (e.g. `go run . 1` for latest listed) |
+| "Analyze session by UUID" | `go run . <UUID_PREFIX>` (e.g. `go run . 01a08446`) |
+| "Audit specific session file" | `go run . ~/.pi/agent/sessions/<workspace-hash>/session.jsonl` |
 | "Unabridged audit (all spikes & tool errors)" | Add `--verbose` to any single-session command |
-| "Turn-by-turn timeline of session" | Add `--timeline` (e.g. `analyze.py 1 --timeline` or `analyze.py -g --timeline`) |
-| "Complete un-sampled turn stream" | Add `--timeline --verbose` (e.g. `analyze.py 1 --timeline --verbose`) |
+| "Turn-by-turn timeline of session" | Add `--timeline` (e.g. `go run . 1 --timeline` or `go run . -g --timeline`) |
+| "Complete un-sampled turn stream" | Add `--timeline --verbose` (e.g. `go run . 1 --timeline --verbose`) |
 | **Macro Reviews (Time Windows)** | |
-| "What did I spend today?" / "Today's review" | `analyze.py --today` |
-| "How did yesterday go?" | `analyze.py --yesterday` |
-| "Review this week / month" | `analyze.py --this-week` (or `--this-month`) |
-| "Review last week / month" | `analyze.py --last-week` (or `--last-month`) |
-| "Review trailing N days" | `analyze.py --days <N>` (e.g. `--days 30`) |
+| "What did I spend today?" / "Today's review" | `go run . --today` |
+| "How did yesterday go?" | `go run . --yesterday` |
+| "Review this week / month" | `go run . --this-week` (or `--this-month`) |
+| "Review last week / month" | `go run . --last-week` (or `--last-month`) |
+| "Review trailing N days" | `go run . --days <N>` (e.g. `--days 30`) |
 | "Isolate macro review to one workspace" | Add `--workspace /path/to/project` to any time-window command |
 | **Micro Incident Delves (Cross-Session Timelines)** | |
-| "Show today's incident timeline / failures" | `analyze.py --today --timeline` |
-| "Why did an error occur around HH:MM?" | `analyze.py --since "YYYY-MM-DD HH:MM" --until "YYYY-MM-DD HH:MM"` *(windows $\le 2\text{h}$ auto-delve)* |
+| "Show today's incident timeline / failures" | `go run . --today --timeline` |
+| "Why did an error occur around HH:MM?" | `go run . --since "YYYY-MM-DD HH:MM" --until "YYYY-MM-DD HH:MM"` *(windows $\le 2\text{h}$ auto-delve)* |
 | **Programmatic Output** | |
 | "Machine-readable data" | Add `--json` to any command above |
 | "Full turns array in JSON" | Add `--json --verbose` or `--json --timeline` |
+| **Time-Aware Cost** | |
+| "Price this against peak/off-peak rates" | Add `--pricing /path/to/pricing.json` (or place it at `~/.pi/agent/pricing.json` to auto-enable) |
+| "Trust Pi's logged costs only" | Add `--no-pricing` |
 
 > [!NOTE]
-> Global `--timeline` across multiple sessions requires an explicit time boundary (such as `--today` or `--since`) to prevent unbounded machine-wide disk scans. When targeting a specific session (e.g. `analyze.py 1 --timeline`), no time filter is needed.
+> Global `--timeline` across multiple sessions requires an explicit time boundary (such as `--today` or `--since`) to prevent unbounded machine-wide disk scans. When targeting a specific session (e.g. `go run . 1 --timeline`), no time filter is needed.
 
 ---
 
@@ -90,6 +91,18 @@ When reporting findings to the user, follow this 5-point template:
    * Deliver exactly two concrete, actionable commands/tips for the user's next turn (e.g. run `/compact` immediately, wait 60s to drain bucket, or use line-slice reads).
 
 ---
+
+### Time-Aware Cost Overrides (`pricing.json`)
+
+Pi bills from one flat rate set per model, so its logged `usage.cost` cannot express peak/off-peak, weekday, holiday or promotional pricing. When a rule matches, the tool **re-prices the turn from its own token counts** against absolute rates and reports the split.
+
+* **Default**: the `pricing.json` shipped in this directory is loaded automatically. Precedence is `--pricing PATH`, then `~/.pi/agent/pricing.json`, then the shipped file. Disable with `--no-pricing`.
+* **Absolute rates only**: each rule must state all of `input`/`output`/`cacheRead`/`cacheWrite` in USD per 1M tokens. Do **not** model off-peak as a fraction of peak — the relationship need not be uniform across rate fields.
+* **Matchers** (`when`): optional, ANDed `weekly` (recurring `{days,start,end}` windows), `dates` (include `YYYY-MM-DD` / `{from,to}` / `"$calendar"`), and `excludeDates`. No `when` = always. First matching rule wins (top-to-bottom).
+* **Validation**: unknown keys, incomplete rates, bad dates and unknown calendar references fail loudly with the offending path.
+* **Reporting**: terminal reports show `Pi-Reported Cost` and `Spend by Rule`; `--json` exposes `cost.pi_reported_total`, `cost.repriced`, `cost.by_rule`, a top-level `pricing` block, and per-turn `pricing_rule`. Macro/micro JSON uses `cost_by_rule`. Timelines tag rule changes with `[RULE:<id>]`. Models with no matching rule keep Pi's logged cost.
+* **Fidelity**: `pricing.ComputeCost` reproduces Pi's per-component billing (including 1-hour cache writes at 2x input), so a turn matches Pi exactly when its applicable rate equals the logged one.
+* Edit the shipped `pricing.json` (or add `~/.pi/agent/pricing.json`) to match your providers' rates.
 
 ### Session Archetype Reference
 
@@ -141,7 +154,7 @@ Classify sessions into one of these archetypes to ground your diagnosis:
   Server-side context cache expires after $\sim 5$ minutes (300s) of inactivity.
   * If `time_gap_sec > 300s`, `cacheRead: 0` is expected idle expiration, not prefix corruption.
 * **Cache State Across Failed 429 Turns**:
-  When a turn fails with a 429 error, 0 tokens are billed, but the session history remains warm at the provider until the 5-minute TTL expires. `analyze.py` preserves `last_successful_total_ctx` and `last_successful_assistant_ts` across error turns so that human pauses following 429 crashes correctly diagnose idle expirations vs. clean prefix evictions.
+  When a turn fails with a 429 error, 0 tokens are billed, but the session history remains warm at the provider until the 5-minute TTL expires. The analyzer preserves `last_successful_total_ctx` and `last_successful_assistant_ts` across error turns so that human pauses following 429 crashes correctly diagnose idle expirations vs. clean prefix evictions.
 * **Server Evictions vs. Prefix Busts**:
   * **Prefix Bust (Client-side)**: Any edit to prior conversation history, system prompt, or message nodes invalidates cache from token 0.
   * **Server Eviction (Provider-side)**: Provider cluster drops cache or routes to an unprimed pod at deep context ($>300\text{k}$), tagged as `[WARN] Server Evictions`.
@@ -190,7 +203,7 @@ Classify sessions into one of these archetypes to ground your diagnosis:
 ---
 
 ### Programmatic JSON Schema (`--json`)
-When `--json` is supplied, `analyze.py` returns an object with the following exact key structure:
+When `--json` is supplied, the tool returns an object with the following exact key structure:
 
 ```json
 {
@@ -222,12 +235,22 @@ When `--json` is supplied, `analyze.py` returns an object with the following exa
   },
   "cost": {
     "total": 6.9392,
+    "pi_reported_total": 6.9392,
+    "repriced": true,
     "fresh_input": 2.0336,
     "cache_read": 4.2731,
     "output": 0.6325,
     "without_cache": 45.3973,
     "savings": 38.4581,
-    "savings_pct": 84.71
+    "savings_pct": 84.71,
+    "by_rule": { "peak": 1.2033, "offpeak": 5.7359 }
+  },
+  "pricing": {
+    "enabled": true,
+    "file": "/Users/me/.pi/agent/pricing.json",
+    "timezone": "UTC",
+    "currency": "USD",
+    "source": "https://api-docs.deepseek.com/quick_start/pricing/"
   },
   "cost_by_model": {
     "gemini-3.8-flash": 6.9392

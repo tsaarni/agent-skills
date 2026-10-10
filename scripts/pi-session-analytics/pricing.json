@@ -1,0 +1,86 @@
+{
+  "_note": "Cost-only override used by the pi-session-analytics tool. Precedence: --pricing PATH, then ~/.pi/agent/pricing.json, then this file in the tool directory. It changes money only; model identity and capabilities are untouched. Rules are evaluated top-to-bottom and the first match wins. Every rule states all four rates as absolute USD per 1M tokens - never as a ratio, because peak and off-peak need not scale uniformly across input, output, cache-read and cache-write.",
+  "version": 1,
+  "timezone": "UTC",
+  "currency": "USD",
+  "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+  "calendars": {
+    "_note": "Chinese public holidays: peak windows are excluded on these dates, making them fully off-peak.",
+    "cn-holidays": [
+      "2026-01-01",
+      "2026-02-16",
+      "2026-02-17",
+      "2026-02-18",
+      "2026-04-05",
+      "2026-05-01",
+      "2026-06-19",
+      "2026-10-01",
+      "2026-10-02"
+    ]
+  },
+  "overrides": {
+    "deepseek": {
+      "deepseek-flash": {
+        "retrievedAt": "2026-10-10",
+        "rules": [
+          {
+            "id": "deepseek-flash-peak",
+            "when": {
+              "weekly": [
+                { "days": ["Mon", "Tue", "Wed", "Thu", "Fri"], "start": "01:00", "end": "04:00" },
+                { "days": ["Mon", "Tue", "Wed", "Thu", "Fri"], "start": "06:00", "end": "10:00" }
+              ],
+              "excludeDates": ["$cn-holidays"]
+            },
+            "rates": { "input": 0.3, "output": 1.2, "cacheRead": 0.006, "cacheWrite": 0.3 }
+          },
+          {
+            "id": "deepseek-flash-offpeak",
+            "rates": { "input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": 0.15 }
+          }
+        ]
+      },
+      "deepseek-v4-flash": {
+        "_note": "Legacy alias of deepseek-flash, billed at Flash prices.",
+        "retrievedAt": "2026-10-10",
+        "rules": [
+          {
+            "id": "deepseek-v4-flash-peak",
+            "when": {
+              "weekly": [
+                { "days": ["Mon", "Tue", "Wed", "Thu", "Fri"], "start": "01:00", "end": "04:00" },
+                { "days": ["Mon", "Tue", "Wed", "Thu", "Fri"], "start": "06:00", "end": "10:00" }
+              ],
+              "excludeDates": ["$cn-holidays"]
+            },
+            "rates": { "input": 0.3, "output": 1.2, "cacheRead": 0.006, "cacheWrite": 0.3 }
+          },
+          {
+            "id": "deepseek-v4-flash-offpeak",
+            "rates": { "input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": 0.15 }
+          }
+        ]
+      },
+      "deepseek-v4-pro": {
+        "retrievedAt": "2026-10-10",
+        "rules": [
+          {
+            "id": "deepseek-v4-pro-peak",
+            "when": {
+              "weekly": [
+                { "days": ["Mon", "Tue", "Wed", "Thu", "Fri"], "start": "01:00", "end": "04:00" },
+                { "days": ["Mon", "Tue", "Wed", "Thu", "Fri"], "start": "06:00", "end": "10:00" }
+              ],
+              "excludeDates": ["$cn-holidays"]
+            },
+            "rates": { "input": 1.32, "output": 3.96, "cacheRead": 0.044, "cacheWrite": 1.32 }
+          },
+          {
+            "id": "deepseek-v4-pro-offpeak",
+            "rates": { "input": 0.66, "output": 1.98, "cacheRead": 0.022, "cacheWrite": 0.66 }
+          }
+        ]
+      }
+    }
+  }
+}
