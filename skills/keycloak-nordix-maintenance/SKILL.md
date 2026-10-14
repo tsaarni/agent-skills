@@ -215,7 +215,7 @@ This phase applies to any explicit backport request: a CVE/security fix, a commi
      ## What's Changed Compared to Upstream
 
      * **{base-version}-nordix-{N}**
-       * Backported [keycloak#{pr}](https://github.com/keycloak/keycloak/pull/{pr}) _"{upstream title}"_. Fixes {CVE-ID}, {CVE-ID}.
+       * Backported [keycloak#{pr}](https://www.github.com/keycloak/keycloak/pull/{pr}) _"{upstream title}"_. Fixes {CVE-ID}, {CVE-ID}.
        * Upgraded {dependency} to {version}. Fixes {CVE-ID}.
      * **{base-version}-nordix-{N-1}**
        * {earlier entries, unchanged}
