@@ -213,6 +213,23 @@ This phase applies to any explicit backport request: a CVE/security fix, a commi
    git push nordix {version}-nordix-{patch}
    ```
 
+## Running Nordix Regression Tests
+
+Tests that cover the nordix fork's local changes. Run tests one at a time.
+
+```bash
+runagent run -n build -- mvnd clean install -DskipTests; runagent wait build; runagent logs build --last 20
+
+# e2e test for LDAP federation and LDAP password policy
+runagent run -n test-ldap -- mvnd test -Pauth-server-quarkus -pl testsuite/integration-arquillian/tests/base -Dkeycloak.logging.level=debug -Dtest="org.keycloak.testsuite.federation.ldap.**"; runagent wait test-ldap; runagent logs test-ldap --last 30
+
+# unit test for reloading Keystore
+runagent run -n test-keystore -- mvnd test -pl services -Dtest=org.keycloak.keystore.TestReloadingKeystore; runagent wait test-keystore; runagent logs test-keystore --last 15
+
+# e2e test for Vault SPI support for client secrets
+runagent run -n test-vault -- mvnd test -f tests/pom.xml -pl base -Dtest=ClientVaultTest; runagent wait test-vault; runagent logs test-vault --last 15
+```
+
 ## Evaluation Checklist
 
 Before finalizing a nordix branch, verify:
