@@ -185,6 +185,12 @@ This phase applies to any explicit backport request: a CVE/security fix, a commi
    - Continue cherry-pick after resolving: `git cherry-pick --continue`
    - Summarize the backport, including the commit reviewed, what it changes, and how any conflicts were resolved
 
+4. **Verify included dependency versions**
+   - After dependency bumps (Quarkus, BOMs, version properties), check the resolved versions with Maven. Do not rely on BOM sources or pom.xml properties.
+   ```bash
+   runagent run -n deptree -- mvnd dependency:tree -pl quarkus/server -Dincludes={groupId}[:{artifactId}],...; runagent wait deptree; runagent logs deptree --last 40
+   ```
+
 ### Phase 5: Finalization
 
 1. **Create version tag**
@@ -260,6 +266,7 @@ Before finalizing a nordix branch, verify:
 - [ ] Log history is clean and chronological
 - [ ] Build succeeds
 - [ ] Nordix regression tests pass
+- [ ] Fixed dependency versions confirmed with Maven
 
 ## Conflict Resolution Strategy
 
