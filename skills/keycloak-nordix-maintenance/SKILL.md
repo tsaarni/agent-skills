@@ -202,6 +202,24 @@ This phase applies to any explicit backport request: a CVE/security fix, a commi
 1. **Create candidate Markdown release notes**
    - Read the release notes from previous nordix release using `gh release view {previous-nordix-tag} --repo Nordix/keycloak`
    - Use that as template to create release notes for the new nordix release
+   - Keep this format strictly. Newest nordix release first; keep all earlier entries of the same base version.
+     ````markdown
+     This release is based on upstream [Keycloak {base-version}](https://github.com/keycloak/keycloak/releases/tag/{base-version}).
+
+     ## What's Changed Compared to Upstream
+
+     * **{base-version}-nordix-{N}**
+       * Backported [keycloak#{pr}](https://github.com/keycloak/keycloak/pull/{pr}) _"{upstream title}"_. Fixes {CVE-ID}, {CVE-ID}.
+       * Upgraded {dependency} to {version}. Fixes {CVE-ID}.
+     * **{base-version}-nordix-{N-1}**
+       * {earlier entries, unchanged}
+
+     **Full Changelog**: https://github.com/Nordix/keycloak/compare/{base-version}...{base-version}-nordix-{N}
+
+     ##  Documentation
+
+     {documentation of nordix features, unchanged from previous release}
+     ````
 
 
 ### Phase 7: Summarization
@@ -240,6 +258,8 @@ Before finalizing a nordix branch, verify:
 - [ ] Merge conflicts properly resolved
 - [ ] Branch has correct tag format: `{version}-nordix-{patch}`
 - [ ] Log history is clean and chronological
+- [ ] Build succeeds
+- [ ] Nordix regression tests pass
 
 ## Conflict Resolution Strategy
 
