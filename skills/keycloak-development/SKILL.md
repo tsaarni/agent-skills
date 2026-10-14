@@ -13,17 +13,17 @@ description: Development environment, building, debugging, testing, Kubernetes d
 - Infer names and IDs from the context when possible. For example, if a realm name is required and there is only one realm, infer that realm name. If there are multiple realms, ask for clarification or use `master` as default.
 - Use `http://keycloak.127-0-0-1.nip.io:8080` as the default base URL for API requests if the user has not specified a different URL for Keycloak.
 - Replace `<ADMIN_TOKEN>` with the actual token value obtained from the token endpoint using command `$(curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/master/protocol/openid-connect/token -d 'username=admin&password=admin&grant_type=password&client_id=admin-cli' | jq -r .access_token)`.
-- Maven/mvnd builds produce huge output. Always use `-l <logfile>` to redirect build output to a file, then `tail` the log to check the result:
+- Maven/mvnd builds produce huge output. Run builds under `runagent` and use `runagent wait` to block until completion, then check the tail of the log:
   ```bash
-  mvnd -l /tmp/build.log clean install ...; tail -20 /tmp/build.log  # success: tail -20, failure: tail -80
+  runagent run -n build -- mvnd clean install ...; runagent wait build; runagent logs build --last 20
   ```
 
 ## Building Keycloak
 
 ### Full Build
 ```bash
-mvnd -l /tmp/kc-build.log clean install -DskipTestsuite -DskipExamples -DskipTests; tail -20 /tmp/kc-build.log # Parallel build with mvnd (faster)
-mvn -l /tmp/kc-build.log clean install -DskipTestsuite -DskipExamples -DskipTests; tail -20 /tmp/kc-build.log # Regular maven build (slower but use if you have issues with mvnd)
+runagent run -n build -- mvnd clean install -DskipTestsuite -DskipExamples -DskipTests; runagent wait build; runagent logs build --last 20 # Parallel build with mvnd (faster)
+runagent run -n build -- mvn clean install -DskipTestsuite -DskipExamples -DskipTests; runagent wait build; runagent logs build --last 20 # Regular maven build (slower but use if you have issues with mvnd)
 ```
 
 Always use `-DskipTests`, not `-Dmaven.test.skip=true`. `-Dmaven.test.skip=true` skips test compilation, which also skips producing test-jars that some modules depend on.
