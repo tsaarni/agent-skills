@@ -5,8 +5,6 @@ description: Use when running applications, servers, or other long running comma
 
 `runagent` is installed and available in `PATH`. If not it can be run via `go run github.com/tsaarni/runagent/cmd/runagent@latest`
 
-Description of commands and flags
-
 ```
 Usage: runagent <command> [flags]
 
@@ -80,9 +78,10 @@ Process States
 
 ## Rules
 
-- Use `-n <name>` when starting processes.
-- Run processes under runagent without any log filtering (like `| grep ERROR`). Filtering can be done when using `runagent logs`.
-- If a dead process with the same name exists, `runagent run` auto-replaces it. If the process is still running, it will fail — use `runagent kill <name>` first or `runagent delete <name>`.
-- After starting a process, check `runagent logs <name> --last 10` to verify it started correctly.
-- When waiting process to exit, use `runagent wait <name>` which will return immediately at process exists and avoids polling.
-- Do not delete processes at the end of a test run unless asked. They might be useful if user asks further questions, or wants to continue testing.
+* Always name processes using `-n <name>`.
+* For background jobs that complete on their own (such as long compilations), run: `runagent run -n <name> -- <compile-commands...>; runagent wait <name>; runagent logs <name> --last <num-lines>`.
+* To wait for a process to finish, run `runagent wait <name>`. This returns immediately when the process exits, so you do not need to poll.
+* Do not filter output when starting a process (avoid commands like `| grep ERROR`). Filter output later using `runagent logs`.
+* `runagent run` automatically replaces dead processes that have the same name. If a process is still active, the command fails; stop or remove it first with `runagent kill <name>` or `runagent delete <name>`.
+* After launching a process, run `runagent logs <name> --last 10` to confirm that it started properly.
+* Keep processes alive after a test run unless instructed to remove them. They may be needed for debugging or follow-up testing.
