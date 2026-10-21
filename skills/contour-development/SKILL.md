@@ -408,6 +408,7 @@ If tests leave namespaces behind: `kubectl delete ns <test-namespace> --ignore-n
 
 ```bash
 http http://echoserver.127-0-0-101.nip.io/host
+https --verify=no https://echoserver.127-0-0-101.nip.io/host
 ```
 
 Load test: see `echoclient` skill for more info.

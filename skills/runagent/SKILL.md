@@ -83,5 +83,6 @@ Process States
 * To wait for a process to finish, run `runagent wait <name>`. This returns immediately when the process exits, so you do not need to poll.
 * Do not filter output when starting a process (avoid commands like `| grep ERROR`). Filter output later using `runagent logs`.
 * `runagent run` automatically replaces dead processes that have the same name. If a process is still active, the command fails; stop or remove it first with `runagent kill <name>` or `runagent delete <name>`.
+* When re-running recurring batch jobs prefer using same name in consequent runs, to avoid cluttering the `runagent ps` list with too many entries.
 * After launching a process, run `runagent logs <name> --last 10` to confirm that it started properly.
 * Keep processes alive after a test run unless instructed to remove them. They may be needed for debugging or follow-up testing.
