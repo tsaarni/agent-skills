@@ -47,7 +47,10 @@ type Turn struct {
 	Credits  float64
 	// Metered is false when the engine logged no usage for the turn, so zero
 	// credits means "unknown" rather than "free".
-	Metered  bool
+	Metered bool
+	// Requests is the number of model requests made during the turn; 0 means
+	// the engine did not log it.
+	Requests int
 	Prompt   string
 	Response string
 	Tools    []ToolCall

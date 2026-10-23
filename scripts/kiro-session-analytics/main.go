@@ -30,13 +30,13 @@ func (g *globals) addFilters(cmd *cobra.Command, tf *timeFlags) {
 func newRoot(g *globals) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "kiro-sa",
-		Short:         "Spend, journal and recall over local Kiro CLI sessions (read-only)",
+		Short:         "Spend, habits, journal and recall over local Kiro CLI sessions (read-only)",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 	root.AddCommand(
-		newListCmd(g),
 		newSpendCmd(g),
+		newHabitsCmd(g),
 		newJournalCmd(g),
 		newFindCmd(g),
 		newShowCmd(g),

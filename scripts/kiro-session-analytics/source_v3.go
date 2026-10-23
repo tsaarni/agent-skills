@@ -119,8 +119,9 @@ type v3Payload struct {
 	PromptTurnSummaries []struct {
 		Usage float64 `json:"usage"`
 	} `json:"promptTurnSummaries"`
-	ElapsedTime float64 `json:"elapsedTime"`
-	StopReason  string  `json:"stopReason"`
+	RequestIDs  []string `json:"requestIds"`
+	ElapsedTime float64  `json:"elapsedTime"`
+	StopReason  string   `json:"stopReason"`
 }
 
 // v3Turn is a turn under construction.
@@ -226,6 +227,7 @@ func (s *v3Source) Load(h SessionHeader, opt LoadOpts) (*Session, error) {
 				cur.Credits += sm.Usage
 				cur.Metered = true
 			}
+			cur.Requests += len(p.RequestIDs)
 			if p.ElapsedTime > 0 {
 				cur.Duration = time.Duration(p.ElapsedTime * float64(time.Millisecond))
 				cur.timed = true

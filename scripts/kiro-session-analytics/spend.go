@@ -3,16 +3,24 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
 
+// topTurns is the number of most expensive turns listed below the table.
+const topTurns = 5
+
 type spendRow struct {
 	Key     string
 	Credits float64
-	Turns   int
-	Metered int
+	Turns   int // turns with usage data
 	Avg     float64
+
+	// Turns that also logged a request count (v3).
+	ReqTurns   int
+	Requests   int
+	ReqCredits float64
 }
 
 type spendTop struct {
@@ -30,13 +38,11 @@ type spendReport struct {
 	To        string
 	By        string
 	Credits   float64
-	Turns     int
-	Metered   int
+	Turns     int // turns with usage data
 	Avg       float64
-	Rows      []spendRow
-	ModelRows []spendRow // per-model breakdown, filled when By is not "model"
-	TopTurns  []spendTop
 	Unmetered int
+	Rows      []spendRow
+	TopTurns  []spendTop
 }
 
 var spendGroups = []string{"workspace", "model", "agent", "day", "session"}
@@ -44,10 +50,9 @@ var spendGroups = []string{"workspace", "model", "agent", "day", "session"}
 func newSpendCmd(g *globals) *cobra.Command {
 	var tf timeFlags
 	var by string
-	var top int
 	cmd := &cobra.Command{
 		Use:   "spend",
-		Short: "Credits by workspace, model, agent, day or session (default: last 7 days)",
+		Short: "Where the credits went: by workspace, model, agent, day or session (default: last 7 days)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			now := g.now()
@@ -55,16 +60,15 @@ func newSpendCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runSpend(g, w, by, top)
+			return runSpend(g, w, by)
 		},
 	}
 	g.addFilters(cmd, &tf)
-	cmd.Flags().IntVar(&top, "top", 5, "number of most expensive turns to list (0 = none)")
-	cmd.Flags().StringVar(&by, "by", "workspace", "group by: workspace, model, agent, day, session")
+	cmd.Flags().StringVar(&by, "by", "workspace", "group by: "+strings.Join(spendGroups, ", "))
 	return cmd
 }
 
-func runSpend(g *globals, w Window, by string, top int) error {
+func runSpend(g *globals, w Window, by string) error {
 	if !contains(spendGroups, by) {
 		return fmt.Errorf("--by must be one of %v, got %q", spendGroups, by)
 	}
@@ -72,7 +76,7 @@ func runSpend(g *globals, w Window, by string, top int) error {
 	if err != nil {
 		return err
 	}
-	rep := buildSpend(turnsIn(sessions, w), by, top)
+	rep := buildSpend(turnsIn(sessions, w), by)
 	for i := range rep.TopTurns {
 		rep.TopTurns[i].Prompt = redact(rep.TopTurns[i].Prompt)
 	}
@@ -102,14 +106,20 @@ func spendKey(r turnRef, by string) string {
 	case "day":
 		return r.T.Start.Format("2006-01-02")
 	default: // session
-		return shortID(r.S.ID) + "  " + shorten(r.S.DisplayTitle(), 40)
+		// Tabs make the parts separate columns, see spendHeader.
+		return fmt.Sprintf("%s\t%s\t%s\t%s", shortID(r.S.ID), r.S.Updated.Format("01-02 15:04"),
+			wsBase(r.S.Workspace), shorten(r.S.DisplayTitle(), 40))
 	}
 }
 
-// groupSpend aggregates refs into rows keyed by spendKey(by).
+// groupSpend aggregates the turns with usage data into rows keyed by
+// spendKey(by).
 func groupSpend(refs []turnRef, by string) []spendRow {
 	rows := map[string]*spendRow{}
 	for _, r := range refs {
+		if !r.T.Metered {
+			continue
+		}
 		k := spendKey(r, by)
 		row := rows[k]
 		if row == nil {
@@ -117,16 +127,16 @@ func groupSpend(refs []turnRef, by string) []spendRow {
 			rows[k] = row
 		}
 		row.Turns++
-		if r.T.Metered {
-			row.Credits += r.T.Credits
-			row.Metered++
+		row.Credits += r.T.Credits
+		if r.T.Requests > 0 {
+			row.ReqTurns++
+			row.Requests += r.T.Requests
+			row.ReqCredits += r.T.Credits
 		}
 	}
 	var out []spendRow
 	for _, row := range rows {
-		if row.Metered > 0 {
-			row.Avg = row.Credits / float64(row.Metered)
-		}
+		row.Avg = row.Credits / float64(row.Turns)
 		out = append(out, *row)
 	}
 	if by == "day" {
@@ -142,72 +152,58 @@ func groupSpend(refs []turnRef, by string) []spendRow {
 	return out
 }
 
-func buildSpend(refs []turnRef, by string, top int) spendReport {
+func buildSpend(refs []turnRef, by string) spendReport {
 	rep := spendReport{By: by}
+	var metered []turnRef
 	for _, r := range refs {
-		rep.Turns++
 		if r.T.Metered {
 			rep.Credits += r.T.Credits
-			rep.Metered++
+			rep.Turns++
+			metered = append(metered, r)
 		} else {
 			rep.Unmetered++
 		}
 	}
-	if rep.Metered > 0 {
-		rep.Avg = rep.Credits / float64(rep.Metered)
+	if rep.Turns > 0 {
+		rep.Avg = rep.Credits / float64(rep.Turns)
 	}
 	if len(refs) > 0 {
 		rep.From = refs[0].T.Start.Format("2006-01-02")
 		rep.To = refs[len(refs)-1].T.Start.Format("2006-01-02")
 	}
 	rep.Rows = groupSpend(refs, by)
-	if by != "model" {
-		rep.ModelRows = groupSpend(refs, "model")
-	}
 
-	if top > 0 {
-		var metered []turnRef
-		for _, r := range refs {
-			if r.T.Metered {
-				metered = append(metered, r)
-			}
-		}
-		sort.SliceStable(metered, func(i, j int) bool { return metered[i].T.Credits > metered[j].T.Credits })
-		if len(metered) > top {
-			metered = metered[:top]
-		}
-		for _, r := range metered {
-			rep.TopTurns = append(rep.TopTurns, spendTop{
-				Credits:   r.T.Credits,
-				Time:      r.T.Start.Format("2006-01-02 15:04"),
-				Workspace: r.S.Workspace,
-				Session:   shortID(r.S.ID),
-				Turn:      r.T.Index,
-				Model:     r.T.Model,
-				Prompt:    shorten(r.T.Prompt, 60),
-			})
-		}
+	sort.SliceStable(metered, func(i, j int) bool { return metered[i].T.Credits > metered[j].T.Credits })
+	if len(metered) > topTurns {
+		metered = metered[:topTurns]
+	}
+	for _, r := range metered {
+		rep.TopTurns = append(rep.TopTurns, spendTop{
+			Credits:   r.T.Credits,
+			Time:      r.T.Start.Format("2006-01-02 15:04"),
+			Workspace: r.S.Workspace,
+			Session:   shortID(r.S.ID),
+			Turn:      r.T.Index,
+			Model:     r.T.Model,
+			Prompt:    shorten(r.T.Prompt, 60),
+		})
 	}
 	return rep
 }
 
 func printSpend(g *globals, rep spendReport) {
-	if rep.Turns == 0 {
+	if rep.Turns == 0 && rep.Unmetered == 0 {
 		fmt.Fprintln(g.out, "No turns found in the selected period.")
 		return
 	}
 	fmt.Fprintf(g.out, "Credits %s .. %s    total %s   turns %d   avg %s/turn\n",
 		rep.From, rep.To, fmtCredits(rep.Credits), rep.Turns, fmtCredits(rep.Avg))
 	if rep.Unmetered > 0 {
-		fmt.Fprintf(g.out, "(%d turns have no usage data and are not counted in credits or the average)\n", rep.Unmetered)
+		fmt.Fprintf(g.out, "(%d more turns have no usage data and are not counted)\n", rep.Unmetered)
 	}
 	fmt.Fprintln(g.out)
 
-	printSpendRows(g, upper(rep.By), rep.Rows)
-	if len(rep.ModelRows) > 0 {
-		fmt.Fprintln(g.out)
-		printSpendRows(g, "MODEL", rep.ModelRows)
-	}
+	printSpendRows(g, spendHeader(rep.By), rep.By == "model", rep.Rows)
 
 	if len(rep.TopTurns) > 0 {
 		fmt.Fprintln(g.out, "\nTOP TURNS")
@@ -220,13 +216,36 @@ func printSpend(g *globals, rep spendReport) {
 	}
 }
 
-func printSpendRows(g *globals, header string, rows []spendRow) {
+// printSpendRows prints the grouped table. With requests set it adds the
+// request columns, which split a turn's cost into steps and price per step.
+func printSpendRows(g *globals, header string, requests bool, rows []spendRow) {
 	tw := newTable(g.out)
-	fmt.Fprintf(tw, "%s\tCREDITS\tTURNS\tAVG\n", header)
+	if requests {
+		fmt.Fprintf(tw, "%s\tCREDITS\tTURNS\tCREDITS/TURN\tREQ/TURN\tCREDITS/REQ\n", header)
+	} else {
+		fmt.Fprintf(tw, "%s\tCREDITS\tTURNS\tCREDITS/TURN\n", header)
+	}
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", r.Key, fmtCredits(r.Credits), r.Turns, fmtCredits(r.Avg))
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s", r.Key, fmtCredits(r.Credits), r.Turns, fmtCredits(r.Avg))
+		if requests {
+			reqTurn, perReq := "-", "-"
+			if r.Requests > 0 {
+				reqTurn = fmt.Sprintf("%.1f", float64(r.Requests)/float64(r.ReqTurns))
+				perReq = fmt.Sprintf("%.2f", r.ReqCredits/float64(r.Requests))
+			}
+			fmt.Fprintf(tw, "\t%s\t%s", reqTurn, perReq)
+		}
+		fmt.Fprintln(tw)
 	}
 	tw.Flush()
+}
+
+// spendHeader is the header of the key column(s).
+func spendHeader(by string) string {
+	if by == "session" {
+		return "SESSION\tUPDATED\tWORKSPACE\tTITLE"
+	}
+	return upper(by)
 }
 
 func upper(s string) string {

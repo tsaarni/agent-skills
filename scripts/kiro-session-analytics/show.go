@@ -156,14 +156,18 @@ func printSessionSummary(w io.Writer, s *Session) {
 	fmt.Fprintf(w, "   %s\n", s.DisplayTitle())
 	fmt.Fprintf(w, "   %d turns, %s credits\n\n", len(s.Turns), fmtCredits(s.TotalCredits()))
 	tw := newTable(w)
-	fmt.Fprintln(tw, "#\tSTART\tCREDITS\tDURATION\tMODEL\tTOOLS\tPROMPT")
+	fmt.Fprintln(tw, "#\tSTART\tCREDITS\tREQ\tCREDITS/REQ\tDURATION\tMODEL\tTOOLS\tPROMPT")
 	for _, t := range s.Turns {
-		credits := "-"
+		credits, req, perReq := "-", "-", "-"
 		if t.Metered {
 			credits = fmtCredits(t.Credits)
+			if t.Requests > 0 {
+				req = fmt.Sprintf("%d", t.Requests)
+				perReq = fmt.Sprintf("%.2f", t.Credits/float64(t.Requests))
+			}
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%d\t%s\n",
-			t.Index, t.Start.Format("2006-01-02 15:04"), credits, fmtDur(t.Duration), t.Model, len(t.Tools), shorten(t.Prompt, 60))
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+			t.Index, t.Start.Format("2006-01-02 15:04"), credits, req, perReq, fmtDur(t.Duration), t.Model, len(t.Tools), shorten(t.Prompt, 60))
 	}
 	tw.Flush()
 }

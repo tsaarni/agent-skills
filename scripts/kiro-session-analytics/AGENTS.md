@@ -13,35 +13,38 @@ go run . <command> [options]
 - **Turn**: one user prompt and everything Kiro does in response until it stops (tool calls, then the final answer). Turns are numbered from 1 within a session (`#12` is the 12th). Credits, model and duration are recorded per turn, so most reports count turns.
 - **Tool call**: one action Kiro takes during a turn, such as running a shell command, reading or writing a file, or calling an MCP tool.
 - **Credits**: Kiro's usage unit, summed over the turns.
+- **Request**: one call to the model within a turn. A turn with tool calls makes several (`REQ/TURN`, `CREDITS/REQ`). Logged by v3 only.
 - **Workspace**: the directory the session was started in.
-- **Active time** (`journal`): the sum of turn durations. Time spent waiting for the user is not counted.
-- **Engine** (`list`): `v3` is the current Kiro CLI storage format and `v2` the older one. Both are read; you do not need to choose.
+- **Active time** (`journal`, `habits`): the sum of turn durations. Time spent waiting for the user is not counted.
+- **Engine**: `v3` is the current Kiro CLI storage format and `v2` the older one. Both are read; you do not need to choose.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `list` | Sessions in the period: date, engine, workspace, id, turns, credits, title. Default period: last 7 days. |
-| `spend` | Credits grouped by `--by workspace` (default), `model`, `agent`, `day` or `session`, plus a per-model table (credits, turns, average per turn) whenever not grouped by model, and the most expensive turns (`--top N`, default 5). Default period: last 7 days. |
+| `spend` | Where the credits went. One table grouped by `--by workspace` (default), `model`, `agent`, `day` or `session`, with credits, turns and credits per turn, then the 5 most expensive turns. `--by model` adds `REQ/TURN` and `CREDITS/REQ`, which split a model's cost into steps per turn and price per step. `--by session` also shows the last-updated time and workspace. Default period: last 7 days. |
+| `habits` | When you work and how session length affects cost. Fixed report: turns, credits and active time per local hour and per weekday (bar scaled to turns; quiet hours inside the active range are listed as `-`); sessions bucketed by number of turns in steps of 5, up to the longest session, with credits, requests per turn and credits per request; credits per request by turn number for each model (`-` = fewer than 3 turns). The session length tables use v3 sessions only. Default period: last 30 days. |
 | `journal` | Work log per day and workspace: active time, credits, sessions, edited files, commits, pushes, PR URLs. Default period: today. |
 | `find` | Turns matching `--file PATH` (read or written, matched by path suffix), `--cmd TEXT` (shell command), `--text TEXT` (prompt or response) or `--output TEXT` (tool output, slow). Case-insensitive substrings. Several options combine with AND. Default period: last 7 days. |
 | `show ID#TURN` | One turn: prompt, tool calls, response. Tool output is cut to `--output-lines N` lines per call (default 6, 0 = none). |
 | `show ID` | Table of the turns in a session. |
 
-`ID` is a session id prefix (4+ characters) as printed by `list`, `spend` and `find`. Hits are printed as `sess <id> #<turn>`, which is the argument for `show`.
+`ID` is a session id prefix (4+ characters) as printed by `spend --by session`, `journal` and `find`. Hits are printed as `sess <id> #<turn>`, which is the argument for `show`.
 
 ## Time and workspace options
 
-`spend`, `journal`, `list` and `find` accept one of:
-`--today`, `--yesterday`, `--this-week`, `--last-week`, `--this-month`, `--last-month`, `--days N`, or a range with `--since "YYYY-MM-DD"` and `--until "YYYY-MM-DD"`.
+`spend`, `habits`, `journal` and `find` accept one of:
+`--today`, `--yesterday`, `--this-week`, `--last-week`, `--this-month`, `--last-month`, `--days N`, or a range with `--since` and `--until` (`"YYYY-MM-DD"` or `"YYYY-MM-DD HH:MM"`, local time).
 
-The same four commands accept `--workspace /path` (includes subdirectories).
+The same commands accept `--workspace /path` (includes subdirectories).
 
 ## Examples
 
 ```bash
 go run . spend --this-week
 go run . spend --days 30 --by model
+go run . spend --days 30 --by session
+go run . habits
 go run . journal --yesterday
 go run . find --file route.go --days 60
 go run . find --cmd 'kind create cluster'
