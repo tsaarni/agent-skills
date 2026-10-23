@@ -40,6 +40,7 @@ Commands:
   delete [target]
     Kill process (if running) and delete its logs.
         --all                  Delete all processes.
+        --stopped              Delete all processes that are not running (exited or killed).
 
   wait <target>
     Block until process exits.

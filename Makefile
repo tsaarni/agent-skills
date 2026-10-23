@@ -32,14 +32,23 @@ install:
 	@ln -sfn "$(PWD)/skills" "$(HOME)/.kiro/skills"
 	@echo "Linked skills to $(HOME)/.kiro/skills"
 
+	# Kiro CLI prompts (file name = prompt name, so strip the .prompt suffix)
+	@mkdir -p "$(HOME)/.kiro/prompts"
+	@for f in prompts/*.prompt.md; do \
+		cp "$$f" "$(HOME)/.kiro/prompts/$$(basename "$$f" .prompt.md).md"; \
+	done
+	@echo "Copied prompts to $(HOME)/.kiro/prompts/"
+
 	# Agents skills (github copilot, pi)
 	@mkdir -p "$(HOME)/.agents"
 	@rm -rf "$(HOME)/.agents/skills"
 	@ln -sfn "$(PWD)/skills" "$(HOME)/.agents/skills"
 	@echo "Linked skills to $(HOME)/.agents/skills"
 
-	# Pi Agent
+	# Pi Agent (file name = command name, so strip the .prompt suffix)
 	@mkdir -p "$(HOME)/.pi/agent/prompts"
-	@cp -r prompts/*prompt.md "$(HOME)/.pi/agent/prompts/"
+	@for f in prompts/*.prompt.md; do \
+		cp "$$f" "$(HOME)/.pi/agent/prompts/$$(basename "$$f" .prompt.md).md"; \
+	done
 
 	@echo "Done!"
