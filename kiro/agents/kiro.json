@@ -1,118 +1,64 @@
 {
   "name": "kiro",
   "description": "generic agent",
-  "prompt": "You are a general-purpose assistant helping with coding, analysis, writing, and problem-solving.\n\n## Audience\n- The user is an experienced programmer.\n- Do not assume prior knowledge of the specific subject or domain being discussed. Match explanations to a technical background without skipping domain-specific context.\n\n## Communication Style\n- Respond in clear, simple, and direct language.\n- Avoid unnecessary commentary, hyperbole, metaphors, analogies, or performative enthusiasm.\n- Keep explanations concise and factual.\n\n## Tool Rules\n- When invoking subagents via the `use_subagent` tool, you MUST explicitly set `agent_name` to \"kiro\". Never omit `agent_name`.",
+  "prompt": "You are a general-purpose assistant helping with coding, analysis, writing, and problem-solving.\n\n## Audience\n- The user is an experienced programmer.\n- Do not assume prior knowledge of the specific subject or domain being discussed. Match explanations to a technical background without skipping domain-specific context.\n\n## Communication Style\n- Respond in clear, simple, and direct language.\n- Avoid unnecessary commentary, hyperbole, metaphors, analogies, or performative enthusiasm.\n- Keep explanations concise and factual.",
   "tools": [
-    "@chrome-devtools/*",
-    "@github/*",
-    "@mcpuppet/*",
-    "code",
-    "glob",
-    "goal",
-    "grep",
-    "introspect",
     "read",
+    "write",
     "shell",
     "subagent",
-    "todo_list",
-    "use_aws",
-    "write"
+    "@chrome-devtools/*",
+    "@github/*",
+    "@mcpuppet/*"
   ],
-  "toolAliases": {},
-  "allowedTools": [
-    "code",
-    "glob",
-    "goal",
-    "grep",
-    "introspect",
-    "read",
-    "subagent",
-    "todo_list",
-    "@github/get_*",
-    "@github/list_*",
-    "@github/search_*",
-    "@github/pull_request_read",
-    "@github/issue_read",
-    "@mcpuppet/*",
-    "@chrome-devtools/*"
-  ],
-  "toolsSettings": {
-    "fs_read": {
-      "allowedPaths": [
-        "./**"
-      ]
-    },
-    "shell": {
-      "deniedCommands": [
-        ".*sed .*-i.*",
-        ".*sed .*--in-place.*"
-      ],
-      "allowedCommands": [
-        "gh issue list .*",
-        "gh issue view .*",
-        "gh pr checks .*",
-        "gh pr list .*",
-        "gh pr view .*",
-        "gh pr diff .*",
-        "gh repo view .*",
-        "gh release list .*",
-        "gh release view .*",
-        "gh run list .*",
-        "gh run view .*",
-        "gh search .*",
-        "git status.*",
-        "git log.*",
-        "git show.*",
-        "git diff.*",
-        "git branch.*",
-        "git remote.*",
-        "git ls-files.*",
-        "git ls-remote.*",
-        "git describe.*",
-        "git tag -l.*",
-        "git rev-parse.*",
-        "git merge-base.*",
-        "ls",
-        "cat",
-        "echo",
-        "sort",
-        "test",
-        "grep",
-        "wc",
-        "git show .* \\| sed .*",
-        "git diff .* \\| sed .*",
-        "git log .* \\| sed .*",
-        "sed -n .*",
-        "jq .*"
-      ],
-      "autoAllowReadonly": true
-    }
-  },
   "resources": [
     "skill://~/.kiro/skills/**/SKILL.md",
     "skill://.kiro/skills/**/SKILL.md"
   ],
-  "hooks": [],
-  "model": null,
   "mcpServers": {
     "github": {
       "url": "https://api.githubcopilot.com/mcp/",
       "headers": {
-        "Authorization": "Bearer ${env:GITHUB_TOKEN}"
-      },
-      "disabled": false
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      }
     },
     "mcpuppet": {
-      "url": "http://127.0.0.1:5420/mcp",
-      "disabled": false
+      "url": "http://127.0.0.1:5420/mcp"
     },
     "chrome-devtools": {
-      "url": "http://127.0.0.1:5420/devtools-mcp",
-      "disabled": false
+      "url": "http://127.0.0.1:5420/devtools-mcp"
     }
   },
   "permissions": {
+    "policies": [
+      "read-only-shell"
+    ],
     "rules": [
+      {
+        "capability": "fs_read",
+        "effect": "allow"
+      },
+      {
+        "capability": "fs_read",
+        "match": [
+          "~/.ssh/**",
+          "~/.gnupg/**",
+          "~/.aws/**",
+          "~/.config/gh/hosts.yml",
+          "~/.local/share/kwalletd/**"
+        ],
+        "effect": "deny"
+      },
+      {
+        "capability": "fs_read",
+        "match": [
+          "**/.env",
+          "**/.env.*",
+          "**/*.pem",
+          "**/*.key"
+        ],
+        "effect": "ask"
+      },
       {
         "capability": "shell",
         "match": [
@@ -141,12 +87,13 @@
           "git rev-parse*",
           "git merge-base*",
           "ls",
-          "cat",
-          "echo",
-          "sort",
-          "test",
-          "grep",
-          "wc",
+          "ls *",
+          "cat *",
+          "grep *",
+          "wc *",
+          "head *",
+          "tail *",
+          "test *",
           "sed -n *",
           "jq *"
         ],
@@ -155,42 +102,34 @@
       {
         "capability": "shell",
         "match": [
-          "*sed *-i*",
-          "*sed *--in-place*"
+          "sed -i*",
+          "sed * -i*",
+          "sed --in-place*",
+          "sed * --in-place*"
         ],
         "effect": "deny"
-      },
-      {
-        "capability": "fs_read",
-        "match": [
-          "./**"
-        ],
-        "effect": "allow"
-      },
-      {
-        "capability": "fs_read",
-        "effect": "allow"
       },
       {
         "capability": "subagent",
         "effect": "allow"
       },
       {
+        "capability": "skill",
+        "effect": "allow"
+      },
+      {
         "capability": "mcp",
         "match": [
           "chrome-devtools/*",
+          "mcpuppet/*",
           "github/get_*",
-          "github/issue_read",
           "github/list_*",
-          "github/pull_request_read",
           "github/search_*",
-          "mcpuppet/*"
+          "github/issue_read",
+          "github/pull_request_read"
         ],
         "effect": "allow"
       }
-    ],
-    "policies": [
-      "read-only-shell"
     ]
   }
 }
