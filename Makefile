@@ -36,15 +36,12 @@ install:
 	@ln -sfn "$(PWD)/prompts" "$(HOME)/.pi/agent/prompts"
 	@echo "Linked prompts & skills -> ~/.pi/agent/ & ~/.agents/"
 
-	# Copilot prompts and instructions
+	# Copilot prompts
 	@rm -rf "$(PROMPTS_DIR)"
 	@mkdir -p "$(PROMPTS_DIR)"
 	@for f in prompts/*.md; do \
 		cp "$$f" "$(PROMPTS_DIR)/$$(basename "$$f" .md).prompt.md"; \
 	done
 	@echo "Copied prompts -> $(PROMPTS_DIR)/"
-	@mkdir -p "$(HOME)/.copilot"
-	@cp instructions/copilot-instructions.md "$(HOME)/.copilot/copilot-instructions.md"
-	@echo "Copied Copilot instructions -> $(HOME)/.copilot/copilot-instructions.md"
 
 	@echo "Done!"

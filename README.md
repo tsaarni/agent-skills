@@ -8,4 +8,4 @@ A collection of personal skills, scripts and prompts for AI coding assistants (G
 make install
 ```
 
-This links skills, prompts, and instructions to the configuration paths expected by each agent.
+This links skills and prompts to the configuration paths expected by each agent.
