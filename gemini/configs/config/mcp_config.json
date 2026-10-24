@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "serverUrl": "http://127.0.0.1:5420/devtools-mcp"
+    }
+  }
+}

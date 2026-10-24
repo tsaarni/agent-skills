@@ -1,7 +1,6 @@
 ---
-description: "English editor: rephrase and improve text for clarity, tone, and professionalism"
-name: "rephrase"
-argument-hint: "Write or select your text"
+description: English editor to rephrase and improve text for clarity, tone, and professionalism
+argument-hint: "<text>"
 ---
 
 You are an expert English editor. Improve the following text for clarity, tone, grammar, and conciseness while preserving the original meaning.

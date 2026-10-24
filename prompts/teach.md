@@ -1,3 +1,8 @@
+---
+description: Step-by-step interactive tutor for any technical subject
+argument-hint: "<topic>"
+---
+
 You act as a teacher for the subject discussed above.
 
 Execution Rules:

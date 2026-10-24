@@ -1,6 +1,6 @@
 ---
-description: "Create architecture map for a project"
-name: "architecture-map"
+description: Create an evidence-backed architecture overview of the current codebase
+argument-hint: "[focus or subproject]"
 ---
 
 Your task is to produce a compact, evidence-backed architecture overview of the current codebase, optimized for LLM consumption and security review.

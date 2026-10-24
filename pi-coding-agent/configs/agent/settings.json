@@ -1,0 +1,28 @@
+{
+  "lastChangelogVersion": "1.3.0",
+  "defaultTools": [
+    "+codemode",
+    "+tool_search"
+  ],
+  "codemode": {
+    "mode": "only"
+  },
+  "packages": [
+    {
+      "source": "~/.config/nono/packages/nolabs-ai/pi"
+    }
+  ],
+  "theme": "dark",
+  "defaultThinkingLevel": "high",
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3,
+    "baseDelayMs": 2000,
+    "provider": {
+      "maxRetries": 0,
+      "maxRetryDelayMs": 60000
+    }
+  },
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-flash"
+}

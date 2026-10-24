@@ -10,45 +10,41 @@ endif
 PWD := $(shell pwd)
 
 install:
-	@echo "Installing agent skills..."
+	@echo "Installing agent customizations..."
 
 	# Antigravity CLI skills
 	@mkdir -p "$(HOME)/.gemini/config"
 	@rm -rf "$(HOME)/.gemini/config/skills"
 	@ln -sfn "$(PWD)/skills" "$(HOME)/.gemini/config/skills"
-	@echo "Linked skills to $(HOME)/.gemini/config/skills"
+	@echo "Linked skills -> $(HOME)/.gemini/config/skills"
+
+	# Antigravity CLI commands
+	@uv run gemini/convert-prompts.py prompts "$(HOME)/.gemini/commands"
+	@echo "Converted prompts -> $(HOME)/.gemini/commands/"
+
+	# Kiro CLI
+	@mkdir -p "$(HOME)/.kiro"
+	@rm -rf "$(HOME)/.kiro/skills" "$(HOME)/.kiro/prompts"
+	@ln -sfn "$(PWD)/skills" "$(HOME)/.kiro/skills"
+	@ln -sfn "$(PWD)/prompts" "$(HOME)/.kiro/prompts"
+	@echo "Linked prompts & skills -> $(HOME)/.kiro/"
+
+	# Pi Agent
+	@mkdir -p "$(HOME)/.agents" "$(HOME)/.pi/agent"
+	@rm -rf "$(HOME)/.agents/skills" "$(HOME)/.pi/agent/prompts"
+	@ln -sfn "$(PWD)/skills" "$(HOME)/.agents/skills"
+	@ln -sfn "$(PWD)/prompts" "$(HOME)/.pi/agent/prompts"
+	@echo "Linked prompts & skills -> ~/.pi/agent/ & ~/.agents/"
 
 	# Copilot prompts and instructions
+	@rm -rf "$(PROMPTS_DIR)"
 	@mkdir -p "$(PROMPTS_DIR)"
-	@cp -r prompts/*prompt.md "$(PROMPTS_DIR)/"
-	@echo "Copied prompts to $(PROMPTS_DIR)/"
-	@mkdir -p "$(HOME)/.copilot/"
+	@for f in prompts/*.md; do \
+		cp "$$f" "$(PROMPTS_DIR)/$$(basename "$$f" .md).prompt.md"; \
+	done
+	@echo "Copied prompts -> $(PROMPTS_DIR)/"
+	@mkdir -p "$(HOME)/.copilot"
 	@cp instructions/copilot-instructions.md "$(HOME)/.copilot/copilot-instructions.md"
-	@echo "Copied Copilot instructions to $(HOME)/.copilot/copilot-instructions.md"
-
-	# Kiro CLI skills
-	@mkdir -p "$(HOME)/.kiro"
-	@rm -rf "$(HOME)/.kiro/skills"
-	@ln -sfn "$(PWD)/skills" "$(HOME)/.kiro/skills"
-	@echo "Linked skills to $(HOME)/.kiro/skills"
-
-	# Kiro CLI prompts (file name = prompt name, so strip the .prompt suffix)
-	@mkdir -p "$(HOME)/.kiro/prompts"
-	@for f in prompts/*.prompt.md; do \
-		cp "$$f" "$(HOME)/.kiro/prompts/$$(basename "$$f" .prompt.md).md"; \
-	done
-	@echo "Copied prompts to $(HOME)/.kiro/prompts/"
-
-	# Agents skills (github copilot, pi)
-	@mkdir -p "$(HOME)/.agents"
-	@rm -rf "$(HOME)/.agents/skills"
-	@ln -sfn "$(PWD)/skills" "$(HOME)/.agents/skills"
-	@echo "Linked skills to $(HOME)/.agents/skills"
-
-	# Pi Agent (file name = command name, so strip the .prompt suffix)
-	@mkdir -p "$(HOME)/.pi/agent/prompts"
-	@for f in prompts/*.prompt.md; do \
-		cp "$$f" "$(HOME)/.pi/agent/prompts/$$(basename "$$f" .prompt.md).md"; \
-	done
+	@echo "Copied Copilot instructions -> $(HOME)/.copilot/copilot-instructions.md"
 
 	@echo "Done!"
