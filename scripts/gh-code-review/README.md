@@ -25,6 +25,8 @@ A tool to generate context-rich prompts for agent code reviews by combining PR m
 
 3. **Start the review** session with an AI assistant:
    ```bash
+   claude "$(cat gh-code-review/<pr_number>/agent-orchestrator.prompt.md)"
+   # or
    kiro-cli chat "$(cat gh-code-review/<pr_number>/agent-orchestrator.prompt.md)"
    # or
    copilot --interactive "$(cat gh-code-review/<pr_number>/agent-orchestrator.prompt.md)"

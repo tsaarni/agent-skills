@@ -5,6 +5,8 @@ description: Use when needing development environment with Kind to do developmen
 
 # Contour Development
 
+**Required: this skill depends on the `kind` skill. Load the `kind` skill together with this one, every time, even if the task is only to read this skill.**
+
 Verify working directory before any task:
 
 ```bash
@@ -15,26 +17,9 @@ Use `http` (httpie) instead of `curl` for testing endpoints.
 
 ---
 
-## Create Kind Cluster
+## Kind Cluster
 
-```bash
-kind get clusters | grep -q contour && { echo "Cluster 'contour' already exists."; exit 0; }
-
-cat <<EOF | kind create cluster --config - --name contour
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-- role: worker
-  extraPortMappings:
-  - containerPort: 80
-    hostPort: 80
-    listenAddress: "127.0.0.101"
-  - containerPort: 443
-    hostPort: 443
-    listenAddress: "127.0.0.101"
-EOF
-```
+Create and access cluster `contour` at `127.0.0.101`, hostnames `*.127-0-0-101.nip.io`. `HOST_IP` below is the host as seen from pods.
 
 Install Contour:
 
@@ -56,7 +41,7 @@ kubectl apply -f https://raw.githubusercontent.com/projectcontour/contour/main/e
 ## Deploy Echoserver
 
 ```bash
-kubectl apply -f - <<'EOF'
+kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -133,54 +118,9 @@ kubectl wait --for=condition=ready --timeout=300s pod -l app=echoserver
 
 ---
 
-## Delete Kind Cluster
-
-```bash
-kind delete cluster --name contour
-```
-
----
-
 ## Run Contour from Source on Host Against Kind Cluster
 
-Patch cluster networking so Envoy connects to Contour running on the host. Run after creating the cluster and before starting Contour on host.
-
-Get the host gateway address:
-
-```bash
-HOST_IP=$(docker network inspect kind | jq -r '.[0].IPAM.Config[0].Gateway')
-```
-
-Apply service and endpoint pointing to host:
-
-```bash
-cat <<EOF | kubectl apply -f -
-kind: Service
-apiVersion: v1
-metadata:
-  name: contour
-  namespace: projectcontour
-spec:
-  type: ClusterIP
-  ports:
-  - port: 8001
-    targetPort: 8001
----
-kind: EndpointSlice
-apiVersion: discovery.k8s.io/v1
-metadata:
-  name: contour-1
-  namespace: projectcontour
-  labels:
-    kubernetes.io/service-name: contour
-addressType: IPv4
-endpoints:
-- addresses:
-  - ${HOST_IP}
-ports:
-- port: 8001
-EOF
-```
+Point Service `contour` in namespace `projectcontour`, port `8001`, at the host so Envoy connects to Contour running there. This replaces the in-cluster Service.
 
 Scale down in-cluster Contour and restart Envoy:
 
@@ -210,6 +150,8 @@ cd ~/work/contour && runagent run -n contour -- go run ./cmd/contour serve \
     --contour-key-file=tls.key \
     --debug
 ```
+
+Contour on host uses the Kind admin kubeconfig, which has more privileges than its in-cluster service account. Deploy a custom image (below) when testing RBAC.
 
 To test config file add `--config-path=/tmp/myconfig.yaml` to the command above.
 
@@ -288,7 +230,7 @@ spec:
     spec:
       containers:
       - name: contour
-        image: localhost/contour:latest
+        image: ghcr.io/projectcontour/contour:latest
         imagePullPolicy: Never'
 
 kubectl -n projectcontour patch daemonset envoy --patch '
@@ -297,11 +239,11 @@ spec:
     spec:
       containers:
       - name: shutdown-manager
-        image: localhost/contour:latest
+        image: ghcr.io/projectcontour/contour:latest
         imagePullPolicy: Never
       initContainers:
       - name: envoy-initconfig
-        image: localhost/contour:latest
+        image: ghcr.io/projectcontour/contour:latest
         imagePullPolicy: Never'
 ```
 
@@ -340,20 +282,22 @@ Use the Makefile targets that manage a separate `contour-e2e` Kind cluster.
 
 ```bash
 make setup-kind-cluster load-contour-image-kind   # Create cluster and build/load image
-make run-e2e                                       # Run all e2e tests
+make run-e2e CONTOUR_E2E_LOCAL_HOST=${HOST_IP}     # Run all e2e tests
 ```
+
+Always pass `CONTOUR_E2E_LOCAL_HOST`: the Makefile default `LOCALIP` can resolve to an IPv6 or LAN address that Envoy cannot use. Test traffic goes to `127.0.0.1:9080/9443` (`test/scripts/kind-expose-port.yaml`), which works on both platforms.
 
 Run focused tests:
 
 ```bash
-make run-e2e CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
-make run-e2e CONTOUR_E2E_PACKAGE_FOCUS=./test/e2e/httpproxy CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
+make run-e2e CONTOUR_E2E_LOCAL_HOST=${HOST_IP} CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
+make run-e2e CONTOUR_E2E_LOCAL_HOST=${HOST_IP} CONTOUR_E2E_PACKAGE_FOCUS=./test/e2e/httpproxy CONTOUR_E2E_TEST_FOCUS="httpproxy-jwt"
 ```
 
 For verbose output, run ginkgo directly:
 
 ```bash
-CONTOUR_E2E_LOCAL_HOST=$(make -s print-local-ip) \
+CONTOUR_E2E_LOCAL_HOST=${HOST_IP} \
 CONTOUR_E2E_IMAGE=ghcr.io/projectcontour/contour:main \
 go run github.com/onsi/ginkgo/v2/ginkgo -tags=e2e -vv -poll-progress-after=120s \
   --focus "httpproxy-jwt" ./test/e2e/httpproxy/
@@ -363,7 +307,7 @@ After code changes, rebuild image then re-run tests:
 
 ```bash
 make load-contour-image-kind
-make run-e2e
+make run-e2e CONTOUR_E2E_LOCAL_HOST=${HOST_IP}
 ```
 
 Clean up: `make cleanup-kind`
@@ -384,12 +328,10 @@ kubectl apply -f examples/gateway/00-crds.yaml
 Run a test with `runagent`:
 
 ```bash
-HOST_IP=$(docker network inspect kind | jq -r '.[0].IPAM.Config[] | select(.Subnet | contains(":") | not) | .Gateway')
-
 runagent run -n e2e-test --cwd ~/work/contour \
   --env CONTOUR_E2E_LOCAL_HOST=${HOST_IP} \
-  --env CONTOUR_E2E_HTTP_URL_BASE=http://127.0.0.101:80 \
-  --env CONTOUR_E2E_HTTPS_URL_BASE=https://127.0.0.101:443 \
+  --env CONTOUR_E2E_HTTP_URL_BASE=http://127-0-0-101.nip.io \
+  --env CONTOUR_E2E_HTTPS_URL_BASE=https://127-0-0-101.nip.io \
   -- go run github.com/onsi/ginkgo/v2/ginkgo -tags=e2e -vv -poll-progress-after=120s \
   --focus "httpproxy-include-regex-condition" ./test/e2e/httpproxy/
 
@@ -397,8 +339,8 @@ runagent wait e2e-test --timeout 600s
 runagent logs e2e-test --last 15
 ```
 
-- `CONTOUR_E2E_LOCAL_HOST` = Docker gateway IP (e.g. `172.18.0.1`) — Envoy inside cluster connects to host Contour via this.
-- `CONTOUR_E2E_HTTP(S)_URL_BASE` = `127.0.0.101:80/443` — test traffic to Envoy via Kind port mappings.
+- `CONTOUR_E2E_LOCAL_HOST`: Envoy inside cluster connects to host Contour via this.
+- `CONTOUR_E2E_HTTP(S)_URL_BASE`: test traffic to Envoy via Kind port mappings.
 
 If tests leave namespaces behind: `kubectl delete ns <test-namespace> --ignore-not-found`
 
@@ -477,7 +419,7 @@ Create `.vscode/settings.json` to enable Go language server support for e2e test
 Run the doc site locally 
 
 ```bash
-runagent run -n hugo-site --cwd /home/tsaarni/work/contour/site -- hugo server --disableFastRender 
+runagent run -n hugo-site --cwd ~/work/contour/site -- hugo server --disableFastRender
 ```
 
 View at http://localhost:1313. Edit markdown in `site/content/`.

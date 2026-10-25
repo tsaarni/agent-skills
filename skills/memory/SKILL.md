@@ -28,6 +28,8 @@ Persistent, compounding memory. Capture once, update in place, never re-derive.
         └── <file>
 ```
 
+Create the directories and `log.md` on first write if they do not exist.
+
 ## log.md
 
 One line per entry. DO NOT touch existing entries, append-only (newest last).
@@ -98,7 +100,7 @@ Project: `contour`, `keycloak`, `openbao`, `vault`, `envoy`, ...
 Run at session start. Shows summaries of the 10 most recently touched records (deduplicated):
 
 ```bash
-cd ~/.agents/memory && tac log.md | awk -F' \\| ' '$4 ~ /./ && !s[$4]++{print $4}' | head -10 | xargs -I{} rg "^summary:" records/{}
+cd ~/.agents/memory 2>/dev/null && [ -f log.md ] && awk -F' \\| ' '$4 ~ /./ {p[++n]=$4} END {for (i=n; i>0; i--) if (!s[p[i]]++) print p[i]}' log.md | head -10 | xargs -I{} rg "^summary:" records/{}
 ```
 
 ```bash

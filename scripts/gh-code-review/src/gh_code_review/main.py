@@ -211,6 +211,7 @@ def main():
 
     rel_orchestrator_path = os.path.relpath(agent_orchestrator_path, os.getcwd())
     print("\nTo start the review, run:")
+    print(f'  claude "$(cat {rel_orchestrator_path})"')
     print(f'  gemini --prompt-interactive "$(cat {rel_orchestrator_path})"')
     print(f'  kiro-cli chat "$(cat {rel_orchestrator_path})"')
     print(f'  copilot --interactive "$(cat {rel_orchestrator_path})"')

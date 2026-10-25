@@ -110,4 +110,7 @@ GitHub Copilot CLI:
 Gemini CLI:
   gemini --prompt-interactive "$(cat {output_path})"
 
+Claude Code CLI
+  claude "$(cat {output_path})"
+
 Collected data directory: {output_path.parent}/""")
