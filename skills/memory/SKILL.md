@@ -19,8 +19,9 @@ Persistent, compounding memory. Capture once, update in place, never re-derive.
 ## Structure
 
 ```
-~/.agents/memory/
-├── log.md
+~/storage/memory/
+├── logs/
+│   └── <hostname>.md
 ├── records/
 │   └── <Name>.md
 └── attachments/
@@ -28,11 +29,11 @@ Persistent, compounding memory. Capture once, update in place, never re-derive.
         └── <file>
 ```
 
-Create the directories and `log.md` on first write if they do not exist.
+Create the directories and `logs/$(hostname -s).md` on first write if they do not exist.
 
-## log.md
+## logs/\<hostname\>.md
 
-One line per entry. DO NOT touch existing entries, append-only (newest last).
+One line per entry in `logs/$(hostname -s).md`. DO NOT touch existing entries, append-only (newest last).
 
 Pipe-delimited: `datetime | project | description | page`.
 
@@ -100,7 +101,7 @@ Project: `contour`, `keycloak`, `openbao`, `vault`, `envoy`, ...
 Run at session start. Shows summaries of the 10 most recently touched records (deduplicated):
 
 ```bash
-cd ~/.agents/memory 2>/dev/null && [ -f log.md ] && awk -F' \\| ' '$4 ~ /./ {p[++n]=$4} END {for (i=n; i>0; i--) if (!s[p[i]]++) print p[i]}' log.md | head -10 | xargs -I{} rg "^summary:" records/{}
+cd ~/storage/memory 2>/dev/null && rg -I "" logs/ 2>/dev/null | sort | awk -F' [|] ' '$4 ~ /./ {p[++n]=$4} END {for (i=n; i>0; i--) if (!s[p[i]]++) print "records/"p[i]}' | xargs -r rg -j1 -Hs "^summary:" | head -10
 ```
 
 ```bash
@@ -114,13 +115,13 @@ rg "^tags:.*tls" records/
 rg "race condition" records/
 
 # Recent activity
-tail -20 log.md
+rg -I "" logs/ | sort | tail -20
 
 # Activity for a project
-rg "\| contour \|" log.md
+rg -I "\| contour \|" logs/ | sort
 
 # Activity in date range
-rg "^2026-07" log.md
+rg -I "^2026-07" logs/ | sort
 ```
 
 ## Write discipline
@@ -128,13 +129,16 @@ rg "^2026-07" log.md
 Every modification to records or attachments requires a log entry. No exceptions.
 
 1. Write/update/delete/rename the record (and its attachments if applicable)
-2. Append to `log.md`
+2. Append to `logs/$(hostname -s).md`
+   - When deleting a record `records/<Name>.md`, prefix the description with `DELETED:` (use `DELETED:` **only** when deleting a record file, never when deleting attachments)
+   - When renaming a record, log two lines: a `DELETED:` entry for the old filename and a new entry for the new filename
 
 Log entry examples:
 ```
 2026-07-27T14:30 | contour | Debugged hot-restart race condition | ContourHotRestart.md
 2026-07-28T10:00 | contour | Updated with fix verification | ContourHotRestart.md
-2026-08-01T16:45 | contour | Deleted, no longer relevant | ContourHotRestart.md
+2026-08-01T16:45 | contour | DELETED: no longer relevant | ContourHotRestart.md
+2026-08-01T16:45 | contour | DELETED: renamed to ContourHotRestart.md | ContourHotReload.md
 2026-08-01T16:45 | contour | Renamed from ContourHotReload.md | ContourHotRestart.md
 2026-08-02T11:20 | contour | Added flamegraph attachment | ContourHotRestart.md
 ```
