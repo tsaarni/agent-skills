@@ -137,6 +137,14 @@ If not OK, set up once and restart colima (restarts all Kind clusters):
 
 The vzNAT subnet is chosen by macOS and is normally `192.168.64.0/24`. Check with `colima ssh -- ip -4 -br addr show lima1`; if it differs, use that subnet instead. Other VMs on vzNAT would conflict with the claimed subnet.
 
+On macOS Sequoia (15+) and newer, [Local Network Privacy (TN3179)](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy) blocks unbundled command-line tools (e.g. Python, Go) from accessing local network subnets (`[Errno 65] No route to host`). Exempt the vzNAT Ethernet bridge subnet system-wide:
+
+```bash
+sudo defaults write /Library/Preferences/com.apple.network.local-network AllowedEthernetLocalNetworkAddresses -array "192.168.64.0/24"
+```
+
+Then reboot (required for macOS networking daemons to apply the exemption).
+
 Differences from the sections above:
 
 - The host as seen from pods is `192.168.5.2`, not the `kind` network gateway shown in "Reach Host Processes from Pods".
