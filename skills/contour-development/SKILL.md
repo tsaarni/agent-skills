@@ -5,15 +5,13 @@ description: Use when needing development environment with Kind to do developmen
 
 # Contour Development
 
-**Required: this skill depends on the `kind` skill. Load the `kind` skill together with this one, every time, even if the task is only to read this skill.**
+**Required: this skill depends on the `kind` and `runagent` skills. Load the `kind` and `runagent` skills together with this one, every time, even if the task is only to read this skill.**
 
 Verify working directory before any task:
 
 ```bash
 test -f go.mod && grep -q 'module github.com/projectcontour/contour' go.mod && echo "OK" || echo "NOT in Contour root"
 ```
-
-Use `http` (httpie) instead of `curl` for testing endpoints.
 
 ---
 
@@ -39,6 +37,8 @@ kubectl apply -f https://raw.githubusercontent.com/projectcontour/contour/main/e
 ---
 
 ## Deploy Echoserver
+
+Use [Echoserver](https://github.com/tsaarni/echoserver) as upstream / backedn service.
 
 ```bash
 kubectl apply -f - <<EOF
@@ -353,7 +353,14 @@ http http://echoserver.127-0-0-101.nip.io/host
 https --verify=no https://echoserver.127-0-0-101.nip.io/host
 ```
 
-Load test: see `echoclient` skill for more info.
+For load testing see `echoclient` skill for more info.
+
+
+---
+
+## External Authorization
+
+To test External Authorization use envoy-ext-test-server.
 
 ---
 
@@ -446,4 +453,4 @@ View at http://localhost:1313. Edit markdown in `site/content/`.
 - Kind docs: https://kind.sigs.k8s.io/
 - Echoserver: https://github.com/tsaarni/echoserver
 - Echoclient: https://github.com/tsaarni/echoclient
-- HTTPie: https://httpie.io/docs
+- envoy-ext-test-server: https://github.com/tsaarni/envoy-ext-test-server

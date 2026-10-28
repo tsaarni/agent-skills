@@ -1,4 +1,4 @@
 ## Agent Memory
 
-Persistent memory wiki at `~/storage/memory/`.
-On startup, read `~/storage/memory/AGENTS.md` — it contains the full protocol.
+Persistent memory wiki.
+On startup, read the `memory` skill — it contains the full protocol, including the storage location.
