@@ -1,0 +1,255 @@
+# What the agent can see.
+#
+# Reads, exec and network are open. Hidden files under $HOME are blocked, then
+# specific paths are named back for toolchains that need them.
+
+- name: reads-allowed
+  action: read
+  verdict: allow
+  match: "true"
+
+- name: exec-allowed
+  action: exec
+  verdict: allow
+  match: "true"
+
+- name: network-allowed
+  action: connect
+  verdict: allow
+  match: family == "AF_INET" || family == "AF_INET6" || family == "AF_NETLINK" || family == "AF_UNSPEC"
+
+- name: unix-sockets-allowed
+  action: connect
+  verdict: allow
+  match: family == "AF_UNIX"
+
+# Hidden files in $HOME are blocked unless named below.
+
+- name: block-hidden-files
+  action: read
+  verdict: deny
+  match: >
+    pathMatch(path, "$HOME/.*") || pathMatch(path, "$HOME/.*/**")
+  message: >
+    Reading '${path}' is not allowed. Do not work around this.
+
+- name: read-caches
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.cache/**") ||
+    pathMatch(path, "$HOME/.npm/**") ||
+    pathMatch(path, "$HOME/.m2/mvnd/**") ||
+    pathMatch(path, "$HOME/.m2/repository/**") ||
+    pathMatch(path, "$HOME/.m2/wrapper/**") ||
+    pathMatch(path, "$HOME/.gradle/caches/**")
+
+  # Credential files that live inside otherwise-allowed trees. Each pattern
+  # outscores the broad ** allow that covers its parent directory, so the deny
+  # wins by specificity. Files only reachable through block-hidden-files are
+  # listed too as defense in depth.
+  # notify: false is used to not confuse the agent this is error. Commands that attempt to read these will still work.
+  # errno: ENOENT makes the files look absent, so tools fall back to defaults
+  # instead of printing their own "permission denied" warnings.
+- name: block-known-credentials
+  action: read
+  verdict: deny
+  match: >
+    pathMatch(path, "$HOME/.cargo/credentials*") ||
+    pathMatch(path, "$HOME/.netrc") ||
+    pathMatch(path, "$HOME/.npmrc") ||
+    pathMatch(path, "$HOME/.docker/config.json")
+  errno: ENOENT
+  notify: false
+
+- name: read-toolchains
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.cargo/**") ||
+    pathMatch(path, "$HOME/.rustup/**") ||
+    pathMatch(path, "$HOME/.pyenv/**") ||
+    pathMatch(path, "$HOME/.rbenv/**") ||
+    pathMatch(path, "$HOME/.local") ||
+    pathMatch(path, "$HOME/.local/bin/**") ||
+    pathMatch(path, "$HOME/.local/lib/**") ||
+    pathMatch(path, "$HOME/.local/share/**") ||
+    pathMatch(path, "$HOME/.local/state/**") ||
+    pathMatch(path, "$HOME/.krew/**")
+
+- name: read-tool-settings
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.config/git/**") ||
+    pathMatch(path, "$HOME/.config/go/**") ||
+    pathMatch(path, "$HOME/.config/gopls/**") ||
+    pathMatch(path, "$HOME/.config/httpie/**") ||
+    pathMatch(path, "$HOME/.config/mise/**") ||
+    pathMatch(path, "$HOME/.config/pnpm/**") ||
+    pathMatch(path, "$HOME/.config/wireshark/**") ||
+    pathMatch(path, "$HOME/.config/gh/config.yml") ||
+    pathMatch(path, "$HOME/.gitconfig") ||
+    pathMatch(path, "$HOME/.gitignore*") ||
+    pathMatch(path, "$HOME/.terminfo/**") ||
+    pathMatch(path, "$HOME/.kube/kuberc") ||
+    pathMatch(path, "$HOME/.kube/cache/**") ||
+    pathMatch(path, "$HOME/.wget-hsts") ||
+    pathMatch(path, "$HOME/.aws/config") ||
+    pathMatch(path, "$HOME/.bazelrc") ||
+    pathMatch(path, "$HOME/.bazeliskrc")
+
+- name: read-docker
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.docker/cli-plugins/**") ||
+    pathMatch(path, "$HOME/.docker/contexts/**") ||
+    pathMatch(path, "$HOME/.docker/buildx/**") ||
+    pathMatch(path, "$HOME/.docker/.token_seed")
+
+# config.json can contain registry auth tokens. Only docker may read it.
+- name: allow-docker-to-read-own-config
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(process.exe, "/usr/bin/docker*") &&
+    pathMatch(path, "$HOME/.docker/config.json")
+
+- name: read-agent-state
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.kiro/**") ||
+    pathMatch(path, "$HOME/.agents/**") ||
+    pathMatch(path, "$HOME/storage/memory/**") ||
+    pathMatch(path, "$HOME/.semantic_search/**")
+
+# gravelpit's own CLI (policy lint/reload/eval, status) reads its config and
+# policy files from inside the very sandbox it manages. Without this, Load()
+# fails, the CLI falls back to scanning the current directory for *.yaml as
+# if it were the policy dir, and reports unrelated parse errors from whatever
+# project happens to be the cwd.
+- name: read-gravelpit-own-config
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.config/gravelpit/**") ||
+    pathMatch(path, "$HOME/.local/share/gravelpit/**")
+
+- name: read-ssh-public-parts
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.ssh/config") ||
+    pathMatch(path, "$HOME/.ssh/known_hosts*") ||
+    pathMatch(path, "$HOME/.ssh/*.pub")
+
+# ssh reads the private keys itself, for every git fetch or push over ssh, and
+# looks for id_*-cert files that do not exist. Denying those reads is not a
+# safety net: it only works while ssh-agent happens to hold the right key, and
+# the agent runs outside the sandbox where no rule can see it. A key on disk but
+# not in the agent would fail to authenticate with no
+# explanation. Granting it to /usr/bin/ssh keeps the protection that matters:
+# cat, python and the agent's own file reader are not ssh. scp, sftp and
+# rsync -e ssh all exec ssh, so they are covered too.
+#
+# process.exe is preferred over startedBy("git"), which would grant the read to
+# anything git spawns.
+- name: allow-ssh-to-read-own-keys
+  action: read
+  verdict: allow
+  match: process.exe == "/usr/bin/ssh" && pathMatch(path, "$HOME/.ssh/id_*")
+
+# hosts.yml holds the gh OAuth token, so it is kept out of read-tool-settings
+# (unlike config.yml, which is just preferences) and only opened by gh itself.
+# Same rationale as allow-ssh-to-read-own-keys above: cat, python and the
+# agent's own file reader stay blocked from reading the token directly.
+- name: allow-gh-to-read-own-token
+  action: read
+  verdict: allow
+  match: process.exe == "/usr/bin/gh" && pathMatch(path, "$HOME/.config/gh/hosts.yml")
+
+# The kubeconfig holds cluster tokens and client keys, so only the Kubernetes
+# CLIs may read it. Same approach as ssh keys and gh token. Other programs that
+# need a cluster (e.g. Go e2e tests using client-go) can be pointed at a
+# workspace copy with KUBECONFIG.
+- name: allow-kube-tools-to-read-own-config
+  action: read
+  verdict: allow
+  match: >
+    (
+      process.exe == "/usr/local/bin/kubectl" ||
+      process.exe == "/usr/local/bin/helm" ||
+      process.exe == "/usr/local/bin/kind" ||
+      process.exe == "/usr/local/bin/minikube"
+    ) && pathMatch(path, "$HOME/.kube/config")
+
+# .ldaprc can hold bind credentials, so only OpenLDAP client tools may read it.
+- name: allow-ldap-tools-to-read-own-config
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(process.exe, "/usr/bin/ldap*") && (
+      pathMatch(path, "$HOME/.ldaprc") ||
+      pathMatch(path, "$HOME/ldaprc")
+    )
+
+# .curlrc can hold credentials (proxy auth, custom headers), so only curl
+# itself may read it. Same approach as ssh keys and gh token.
+- name: allow-curl-to-read-own-config
+  action: read
+  verdict: allow
+  match: >
+    process.exe == "/usr/bin/curl" && (
+      pathMatch(path, "$HOME/.curlrc") ||
+      pathMatch(path, "$HOME/.config/curlrc")
+    )
+
+- name: read-shell-startup
+  action: read
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.profile") ||
+    pathMatch(path, "$HOME/.bashrc") ||
+    pathMatch(path, "$HOME/.bash_profile") ||
+    pathMatch(path, "$HOME/.inputrc")
+
+# Socket denies.
+
+- name: block-keyring-sockets
+  action: connect
+  verdict: deny
+  match: >
+    family == "AF_UNIX" && (
+      pathMatch(socket, "/run/user/*/bus") ||
+      socket == "/run/dbus/system_bus_socket" ||
+      pathMatch(socket, "/run/user/*/at-spi/**") ||
+      pathMatch(socket, "/run/user/*/kwallet*.socket") ||
+      pathMatch(socket, "/run/user/*/keyring/**") ||
+      pathMatch(socket, "/run/user/*/gcr/**") ||
+      pathMatch(socket, "$HOME/.gnupg/S.*")
+    )
+  message: >
+    Connecting to '${socket}' is not allowed. Do not work around this.
+
+- name: allow-ssh-agent-sockets
+  action: connect
+  verdict: allow
+  match: >
+    family == "AF_UNIX" && (
+      pathMatch(socket, "/run/user/*/keyring/ssh") ||
+      pathMatch(socket, "/run/user/*/gcr/ssh") ||
+      pathMatch(socket, "/tmp/ssh-*/agent.*")
+    )
+
+- name: protect-gravelpit-socket
+  action: connect
+  verdict: deny
+  match: >
+    family == "AF_UNIX" && (
+      pathMatch(socket, "$XDG_RUNTIME_DIR/gravelpit/**") ||
+      pathMatch(socket, "/tmp/gravelpit-*/**")
+    )
+  message: >
+    Connecting to '${socket}' is not allowed. Do not work around this.

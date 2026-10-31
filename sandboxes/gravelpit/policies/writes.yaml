@@ -1,0 +1,138 @@
+# What the agent may change.
+#
+# write, delete and metadata start closed. Hidden files under $HOME are blocked,
+# then specific paths are named back, same approach as the read side.
+
+- name: block-write-hidden-files
+  action: [write, delete]
+  verdict: deny
+  match: >
+    pathMatch(path, "$HOME/.*") || pathMatch(path, "$HOME/.*/**")
+  message: >
+    Writing '${path}' is not allowed. Do not work around this.
+
+- name: workspace-and-scratch
+  action: [write, delete]
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/work/**") ||
+    pathMatch(path, "$WORKDIR/**") ||
+    pathMatch(path, "/tmp/**") ||
+    pathMatch(path, "/var/tmp/**") ||
+    pathMatch(path, "/dev/**") ||
+    pathMatch(path, "/run/user/*/runagent/**") ||
+    pathMatch(path, "/sys/kernel/debug/tracing/trace_marker")
+
+- name: build-caches
+  action: [write, delete]
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.cache/**") ||
+    pathMatch(path, "$HOME/go/pkg/**") ||
+    pathMatch(path, "$HOME/sdk/**") ||
+    pathMatch(path, "$HOME/.m2/**") ||
+    pathMatch(path, "$HOME/.npm/**") ||
+    pathMatch(path, "$HOME/.cargo/registry/**") ||
+    pathMatch(path, "$HOME/.cargo/.global-cache") ||
+    pathMatch(path, "$HOME/.cargo/.global-cache-journal") ||
+    pathMatch(path, "$HOME/.cargo/.package-cache") ||
+    pathMatch(path, "$HOME/.cargo/.package-cache-mutate") ||
+    pathMatch(path, "$HOME/.gradle/caches/**") ||
+    pathMatch(path, "$HOME/.local/share/pnpm/**") ||
+    pathMatch(path, "$HOME/.docker/buildx/**")
+
+- name: tool-state
+  action: [write, delete]
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.config/gh/**") ||
+    pathMatch(path, "$HOME/.config/go/**") ||
+    pathMatch(path, "$HOME/.config/pnpm/**") ||
+    pathMatch(path, "$HOME/.config/uv/**") ||
+    pathMatch(path, "$HOME/.kube/cache/**") ||
+    pathMatch(path, "$HOME/.kiro/**") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/**") ||
+    pathMatch(path, "$HOME/.agents/**") ||
+    pathMatch(path, "$HOME/storage/memory/**") ||
+    pathMatch(path, "$HOME/.local/state/runagent/**") ||
+    pathMatch(path, "$HOME/.semantic_search/**") ||
+    pathMatch(path, "$HOME/.wget-hsts") ||
+    pathMatch(path, "$HOME/.docker/.token_seed") ||
+    pathMatch(path, "$HOME/.docker/.token_seed.lock") ||
+    pathMatch(path, "/run/user/*/kiro-log/**")
+
+# The kubeconfig holds credentials. Only the Kubernetes CLIs may update it
+# (context switches, kind/minikube cluster creation). The .lock file is
+# client-go's lock used while rewriting the config.
+- name: allow-kube-tools-to-write-own-config
+  action: [write, delete]
+  verdict: allow
+  match: >
+    (
+      process.exe == "/usr/local/bin/kubectl" ||
+      process.exe == "/usr/local/bin/helm" ||
+      process.exe == "/usr/local/bin/kind" ||
+      process.exe == "/usr/local/bin/minikube"
+    ) && (
+      pathMatch(path, "$HOME/.kube/config") ||
+      pathMatch(path, "$HOME/.kube/config.lock")
+    )
+
+- name: known-hosts
+  action: write
+  verdict: allow
+  match: pathMatch(path, "$HOME/.ssh/known_hosts")
+
+# A process may write to its own /proc/self/ entries: fd passing, shell
+# redirection (/dev/fd/N, /proc/self/fd/N), coredump_filter, oom_score_adj.
+# Only "self" is matched. Another process's /proc/<pid>/ stays literal and
+# is denied, so this does not open up every same-uid process.
+- name: write-proc-self
+  action: write
+  verdict: allow
+  match: pathMatch(path, "/proc/self/**")
+
+# JDK diagnostic tools (jcmd, jstack, jps, jmap, jfr, etc.) create
+# .attach_pid files in the target JVM's cwd via /proc/<pid>/cwd/ to trigger
+# the attach listener.
+- name: write-proc-attach
+  action: write
+  verdict: allow
+  match: >
+    pathMatch(path, "/proc/*/cwd/.attach_pid*") &&
+    pathMatch(process.exe, "$HOME/.local/share/mise/installs/java/*/bin/*")
+
+# gravelpit's own config and data are protected from the agent.
+- name: protect-gravelpit-files
+  action: [write, delete]
+  verdict: deny
+  match: >
+    pathMatch(path, "$HOME/.config/gravelpit/**") ||
+    pathMatch(path, "$HOME/.local/share/gravelpit/**")
+  message: >
+    Writing '${path}' is not allowed. Do not work around this.
+
+# metadata (chmod/chown)
+
+- name: chmod-wont-help
+  action: metadata
+  verdict: deny
+  match: "true"
+  message: >
+    Changing permissions of '${path}' is not allowed and would not help. Access is decided
+    by path, not file permissions. Do not work around this.
+
+- name: chmod-in-writable-paths
+  action: metadata
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/work/**") ||
+    pathMatch(path, "$WORKDIR/**") ||
+    pathMatch(path, "/tmp/**") ||
+    pathMatch(path, "/var/tmp/**") ||
+    pathMatch(path, "$HOME/.cache/**") ||
+    pathMatch(path, "$HOME/go/pkg/**") ||
+    pathMatch(path, "$HOME/sdk/**") ||
+    pathMatch(path, "$HOME/.local/share/mise/**") ||
+    pathMatch(path, "$HOME/.docker/buildx/**") ||
+    pathMatch(path, "$HOME/.kube/cache/**")
