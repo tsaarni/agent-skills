@@ -1,6 +1,6 @@
 ---
 name: keycloak-development
-description: Development environment, building, debugging, testing, Kubernetes deployment, and admin REST API for managing realms, users, clients, LDAP federation, identity providers, OAuth2/OIDC, authorization services and UMA.
+description: "Keycloak: build, debug, test, deploy to Kubernetes, admin REST API."
 ---
 
 # Keycloak Development

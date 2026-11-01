@@ -1,6 +1,6 @@
 ---
 name: kind
-description: Use when creating or accessing a local Kind Kubernetes cluster.
+description: "Create or access a local Kind Kubernetes cluster."
 ---
 
 # Kind Clusters

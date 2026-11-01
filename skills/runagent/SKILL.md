@@ -1,6 +1,6 @@
 ---
 name: runagent
-description: Use when running applications, servers, or other long running commands in the background during debugging, testing, or development.
+description: "Run servers and long-running commands in the background while debugging or testing."
 ---
 
 `runagent` is installed and available in `PATH`. If not it can be run via `go run github.com/tsaarni/runagent/cmd/runagent@latest`

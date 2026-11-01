@@ -1,6 +1,6 @@
 ---
 name: echoclient
-description: Use this for HTTP load tests or custom traffic generation, also for non-HTTP load generation.
+description: "HTTP and non-HTTP load tests and custom traffic generation with echoclient."
 ---
 
 ## CLI

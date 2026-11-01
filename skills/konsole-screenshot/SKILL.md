@@ -1,6 +1,6 @@
 ---
 name: konsole-screenshot
-description: Open a new Konsole terminal, run a command, take a screenshot, and close. Use for capturing terminal output as images.
+description: "Screenshot a command's output in a new Konsole terminal."
 argument-hint: <output_file> <command to run>
 ---
 

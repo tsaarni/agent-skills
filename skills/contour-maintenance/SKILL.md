@@ -1,6 +1,6 @@
 ---
 name: contour-maintenance
-description: How to do version bumps (Go, Envoy), dependency updates, and vulnerability / CVE checks for release branches and images
+description: "Contour release branches: Go/Envoy bumps, dependency updates, CVE checks."
 ---
 
 # Contour Maintenance Tasks

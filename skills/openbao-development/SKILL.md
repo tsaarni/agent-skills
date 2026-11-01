@@ -1,6 +1,6 @@
 ---
 name: openbao-development
-description: Use when developing, testing, troubleshooting, learning runtime behavior.
+description: "OpenBao: dev environment, testing, troubleshooting, runtime behavior."
 ---
 
 # OpenBao Development

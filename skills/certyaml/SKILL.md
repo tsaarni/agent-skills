@@ -1,6 +1,6 @@
 ---
 name: certyaml
-description: Use this skill when you need x509 certificates for tests. 
+description: "Generate x509 certificates and CA chains for tests with certyaml."
 ---
 
 ## CLI

@@ -1,6 +1,6 @@
 ---
 name: envoy-development
-description: Use when needing a development environment to debug/troubleshoot, experiment or compile custom builds
+description: "Envoy: dev environment, custom builds, debugging."
 ---
 
 # Envoy Development

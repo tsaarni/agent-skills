@@ -1,6 +1,6 @@
 ---
 name: keycloak-nordix-maintenance
-description: Create fork releases with cherry-picked backports and security fixes.
+description: "Keycloak Nordix fork: releases with cherry-picked backports and security fixes."
 ---
 
 # Keycloak Nordix Release Skill

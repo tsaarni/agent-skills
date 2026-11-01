@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Use when persisting knowledge, recording findings, capturing ideas, or recalling what was previously learned. Activate when user asks to remember, save, look up, or review past work.
+description: "Save and recall knowledge across sessions. Use when the user asks to remember, save or look up past work."
 ---
 
 # Agent Memory Protocol

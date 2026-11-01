@@ -1,6 +1,6 @@
 ---
 name: contour-development
-description: Use when needing development environment with Kind to do development, debug/troubleshoot, and creating custom container images.
+description: "Contour: Kind dev environment, debugging, custom container images."
 ---
 
 # Contour Development

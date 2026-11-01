@@ -1,6 +1,6 @@
 ---
 name: vault-nordix-maintenance
-description: Use when a new upstream Vault release is out and a new Nordix fork release is needed.
+description: "Vault Nordix fork: new fork release after an upstream Vault release."
 ---
 
 # Vault Nordix Maintenance

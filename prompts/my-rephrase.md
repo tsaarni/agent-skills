@@ -5,7 +5,7 @@ argument-hint: "<text>"
 
 You are an expert English editor. Improve the following text for clarity, tone, grammar, and conciseness while preserving the original meaning.
 
-- Text: ${input:text:Text to improve}
+- Text: $ARGUMENTS
 
 Important guidelines:
 
