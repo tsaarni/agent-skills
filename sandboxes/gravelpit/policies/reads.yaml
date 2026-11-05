@@ -243,6 +243,18 @@
       pathMatch(socket, "/tmp/ssh-*/agent.*")
     )
 
+# gh stores its OAuth token in the Secret Service keyring (gnome-keyring),
+# reached over the session bus. Only gh itself may connect, so the token stays
+# out of the environment and other processes still cannot reach the keyring.
+# gh is statically linked, so LD_PRELOAD cannot inject code that inherits this.
+# Extensions and "!" aliases run as separate executables and are not covered.
+- name: allow-gh-to-use-session-bus
+  action: connect
+  verdict: allow
+  match: >
+    process.exe == "/usr/bin/gh" && family == "AF_UNIX" &&
+    pathMatch(socket, "/run/user/*/bus")
+
 - name: protect-gravelpit-socket
   action: connect
   verdict: deny

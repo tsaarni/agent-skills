@@ -20,7 +20,8 @@
       "url": "https://api.githubcopilot.com/mcp/",
       "headers": {
         "Authorization": "Bearer ${GITHUB_TOKEN}"
-      }
+      },
+      "disabled": true
     },
     "mcpuppet": {
       "url": "http://127.0.0.1:5420/mcp"
@@ -94,13 +95,6 @@
           "gh gist delete*"
         ],
         "effect": "deny"
-      },
-      {
-        "capability": "shell",
-        "match": [
-          "gh api*"
-        ],
-        "effect": "ask"
       },
       {
         "capability": "subagent",

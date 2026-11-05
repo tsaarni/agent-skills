@@ -3,6 +3,8 @@
   "description": "Sandbox agent - allows most operations, blocks external submissions",
   "prompt": "You are a general-purpose assistant helping with coding, analysis, writing, and problem-solving.\n\n## Audience\n- The user is an experienced programmer.\n- Do not assume prior knowledge of the specific subject or domain being discussed. Match explanations to a technical background without skipping domain-specific context.\n\n## Communication Style\n- Respond in clear, simple, and direct language.\n- Avoid unnecessary commentary, hyperbole, metaphors, analogies, or performative enthusiasm.\n- Keep explanations concise and factual.\n- Lead with the answer or result, then supporting detail.\n- State uncertainty explicitly; distinguish verified facts from inferences.\n- Reference code as `path:line`.\n\n## Working Rules\n- Do what was asked. Do not refactor, reformat, or add features beyond the request; mention other issues instead of fixing them.\n- Read relevant code before changing it. Verify APIs and behaviour rather than guessing.\n- Follow existing project conventions. Do not add dependencies without asking.\n- If a request is ambiguous in a way that changes the outcome, ask. Otherwise choose the conventional option, state it, and proceed.\n- Before deleting, overwriting, or running destructive git commands, check what would be lost. Never discard uncommitted work you did not create.\n- Fix root causes. Do not silence errors, skip tests, or special-case inputs to make checks pass.\n- Report results faithfully: if something fails, say so with the relevant output. Do not claim success without verifying.\n\n## Tool Rules\n- When invoking subagents via the `use_subagent` tool, you MUST explicitly set `agent_name` to \"kiro-nono\". Never omit `agent_name`.\n-  You are running in a sandbox. Any unexpected operation failure is likely due to sandbox restrictions. Stop immediately on the first failure, describe what happened, and ask the user for instructions. Do not attempt workarounds or retries.",
   "tools": [
+    "@github/*",
+    "@mcpuppet/*",
     "code",
     "glob",
     "goal",
@@ -13,9 +15,7 @@
     "subagent",
     "todo_list",
     "use_aws",
-    "write",
-    "@github/*",
-    "@mcpuppet/*"
+    "write"
   ],
   "toolAliases": {},
   "allowedTools": [
@@ -36,10 +36,15 @@
   ],
   "toolsSettings": {
     "fs_read": {
-      "allowedPaths": ["./**", "~/**"]
+      "allowedPaths": [
+        "./**",
+        "~/**"
+      ]
     },
     "write": {
-      "allowedPaths": ["./**"]
+      "allowedPaths": [
+        "./**"
+      ]
     },
     "shell": {
       "deniedCommands": [
@@ -72,7 +77,7 @@
     "skill://~/.kiro/skills/**/SKILL.md",
     "skill://.kiro/skills/**/SKILL.md"
   ],
-  "hooks": {},
+  "hooks": [],
   "model": null,
   "mcpServers": {
     "github": {
@@ -95,5 +100,95 @@
       "url": "http://127.0.0.1:5420/mcp",
       "disabled": false
     }
+  },
+  "permissions": {
+    "rules": [
+      {
+        "capability": "shell",
+        "match": [
+          "*"
+        ],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": [
+          "git*push*",
+          "gh*pr*create*",
+          "gh*pr*merge*",
+          "gh*pr*close*",
+          "gh*pr*comment*",
+          "gh*pr*review*",
+          "gh*pr*edit*",
+          "gh*issue*create*",
+          "gh*issue*close*",
+          "gh*issue*comment*",
+          "gh*issue*edit*",
+          "gh*issue*delete*",
+          "gh*release*create*",
+          "gh*release*delete*",
+          "gh*repo*create*",
+          "gh*repo*delete*",
+          "gh*repo*fork*",
+          "gh*gist*create*"
+        ],
+        "effect": "deny"
+      },
+      {
+        "capability": "fs_read",
+        "match": [
+          "./**",
+          "~/**"
+        ],
+        "effect": "allow"
+      },
+      {
+        "capability": "fs_write",
+        "match": [
+          "./**"
+        ],
+        "effect": "allow"
+      },
+      {
+        "capability": "fs_read",
+        "effect": "allow"
+      },
+      {
+        "capability": "fs_write",
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "effect": "allow"
+      },
+      {
+        "capability": "subagent",
+        "effect": "allow"
+      },
+      {
+        "capability": "mcp",
+        "match": [
+          "github/get_*",
+          "github/issue_read",
+          "github/list_*",
+          "github/pull_request_read",
+          "github/search_*",
+          "mcpuppet/*"
+        ],
+        "effect": "allow"
+      },
+      {
+        "capability": "skill",
+        "effect": "allow"
+      }
+    ],
+    "policies": [
+      "read-only-shell"
+    ]
+  },
+  "kiroUpgrade": {
+    "revision": 2,
+    "fingerprint": "sha256:68547752e76d23ba170759d443d365cb2da02ea70968a5d8278ed86fd34a41d1",
+    "source": "sha256:59a7eb6b55e4c23a96e40096cb76dad6082ed479652bf6bd18e31957e46adfb6"
   }
 }
