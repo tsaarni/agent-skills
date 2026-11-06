@@ -72,6 +72,22 @@ gh search issues --repo $R "$TEST" --json url,state,title
 gh run list -R $R -c $SHA --json databaseId,workflowName,conclusion,attempt
 ```
 
+## Gotchas
+
+- Know which commit was tested. `pull_request` workflows test a merge of the PR onto the base branch as it was when the run started, so a failure can come from a base-branch change the PR's own branch doesn't have yet. `workflow_run` workflows run on the latest commit of the default branch, not the PR commit. In both cases, check what the base branch looked like at that point before classifying a failure as PR-caused.
+- Runs started by `workflow_run` are recorded under the default branch, not the PR. `gh run list -c <PR sha>` doesn't find them, and run lists for the default branch include such runs from every PR, so they don't show the default branch's health. If the project posts its own check runs on PR commits (`app.slug` is not `github-actions`), take the run ID from `external_id` or `details_url` as in Collect. Use the same app's check runs on recent default-branch commits for the branch's real history:
+  ```bash
+  APP=$(gh api repos/$R/check-runs/$CHECK_RUN_ID --jq .app.id)   # any of the app's check runs
+  for s in $(gh api "repos/$R/commits?sha=$BASE&per_page=10" --jq '.[].sha'); do
+    gh api "repos/$R/commits/$s/check-runs?app_id=$APP" --jq ".check_runs[]|\"$s \(.name) \(.conclusion)\""
+  done
+  ```
+- A summary job (e.g. `complete`, `status`, `all-checks`) fails whenever another job fails and has no error of its own. Skip it.
+- Logs print the inputs of each action step, which can contain words like `ERROR` or `FAILED`. A grep match there is not an error. Check the annotations first.
+- Builds and tests may run outside the GitHub runner (Bazel remote execution, BuildBuddy, EngFlow, Buildkite). File paths in the log, such as `test.log`, are on the remote machine and can't be fetched. Use the test output printed in the job log, and report the external link if there is one.
+- Rerunning depends on the user's access. Users with write access can run `gh run rerun <run_id> --failed`. Others need a bot command if the repo has one (see CONTRIBUTING.md, or comments like `/retest` on other PRs), or a maintainer. Recommend the rerun; don't trigger it yourself.
+- A failing test may come from another repository (a fetched dependency, an examples repo). Search issues in that repository too.
+
 ## Analysis
 
 For each failed job, find the **first** error. Later errors are usually a cascade. Quote the exact error line and note the file:line and test name. For a PR, check the diff to see whether the PR touched the failing code, its dependencies, generated files or build config. Search the local repo for the failing test or function. Search issues for failing test names: an open or recently closed match strongly suggests the test is flaky. Don't speculate without evidence. Use **Uncertain** when the evidence is missing or contradictory.

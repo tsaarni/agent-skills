@@ -122,11 +122,10 @@ kubectl wait --for=condition=ready --timeout=300s pod -l app=echoserver
 
 Point Service `contour` in namespace `projectcontour`, port `8001`, at the host so Envoy connects to Contour running there. This replaces the in-cluster Service.
 
-Scale down in-cluster Contour and restart Envoy:
+Scale down in-cluster Contour:
 
 ```bash
 kubectl -n projectcontour scale deployment contour --replicas=0
-kubectl -n projectcontour delete daemonset -l app=envoy --force
 ```
 
 Extract TLS certificates for local Contour:
@@ -150,6 +149,18 @@ cd ~/work/contour && runagent run -n contour -- go run ./cmd/contour serve \
     --contour-key-file=tls.key \
     --debug
 ```
+
+Restart Envoy only after host Contour is listening on `:8001`, so Envoy connects to the new Contour:
+
+```bash
+kubectl -n projectcontour delete pod -l app=envoy --force --grace-period=0
+kubectl -n projectcontour wait --for=condition=ready --timeout=120s pod -l app=envoy
+```
+
+- Envoy reports ready only after it receives config from Contour. Never wait for Envoy readiness (`wait`, `rollout status`) while no Contour is running: the wait hangs until timeout.
+- Use `--force --grace-period=0`. A normal delete runs the shutdown-manager drain hook, which can block for `terminationGracePeriodSeconds` (300s).
+- To switch Contour builds, stop the old process, start the new one, then restart Envoy.
+- If Envoy logs `CERTIFICATE_VERIFY_FAILED`, the local `ca.crt`/`tls.crt`/`tls.key` don't match the `contourcert` secret. Extract them again.
 
 Contour on host uses the Kind admin kubeconfig, which has more privileges than its in-cluster service account. Deploy a custom image (below) when testing RBAC.
 

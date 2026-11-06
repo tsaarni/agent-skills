@@ -301,6 +301,17 @@ Or if you just want clang-format on those specific files without the full checke
 bazel run @llvm_toolchain_llvm//:bin/clang-format -- -i <file1> <file2> ...
 ```
 
+### CI
+
+Envoy CI runs through the `ci-envoy` GitHub App. The `Request` workflow runs on the PR commit and starts the real workflows (Prechecks, Checks, Publish & verify, ...) through `workflow_run`, so they run on the latest `main` commit with the PR merged.
+
+- The PR's `ci-envoy` check runs give the run ID (`external_id`). The tested `main` commit is `base-sha` in the check run's `.output.text`.
+- For the health of `main`, use the `ci-envoy` check runs on `main` commits.
+- The job `request / complete` fails whenever another job fails. Skip it.
+- Bazel runs on EngFlow remote execution. `test.log` paths in the job log can't be fetched; the job log has the failing test's output.
+- Tests named `@envoy-examples//:<name>_result` come from the `envoyproxy/examples` repo. Search issues in both repos.
+- The PR author can rerun failed jobs by commenting `/retest` on the PR. Ask the user before posting it.
+
 ### Build Documentation Locally
 
 Build and serve the Sphinx docs to preview changelog entries, API docs, etc.
