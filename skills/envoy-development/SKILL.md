@@ -179,6 +179,7 @@ for the full list (`site/content/resources/compatibility-matrix.md` in the Conto
 # HTTP filters (Contour DefaultFilters)
 "envoy.filters.http.compressor": "//source/extensions/filters/http/compressor:config",
 "envoy.filters.http.cors": "//source/extensions/filters/http/cors:config",
+"envoy.filters.http.ext_authz": "//source/extensions/filters/http/ext_authz:config",
 "envoy.filters.http.grpc_stats": "//source/extensions/filters/http/grpc_stats:config",
 "envoy.filters.http.grpc_web": "//source/extensions/filters/http/grpc_web:config",
 "envoy.filters.http.local_ratelimit": "//source/extensions/filters/http/local_ratelimit:config",
@@ -191,6 +192,12 @@ for the full list (`site/content/resources/compatibility-matrix.md` in the Conto
 # Access log rate limiting
 "envoy.access_loggers.extension_filters.process_ratelimit": "//source/extensions/access_loggers/filters/process_ratelimit:config",
 ```
+
+`ext_authz` is needed even when no HTTPProxy uses external authorization: Contour's route
+config references `ExtAuthzPerRoute`. Without it Envoy rejects RDS for `ingress_http`, plain
+HTTP virtual hosts return 404, and Contour resends the rejected config in a tight loop.
+Check with `curl -s "localhost:9001/stats?filter=rds.ingress_http"`: `update_rejected`
+keeps growing and `update_success` stays at 0.
 
 ### Build Container Image for Kind
 
@@ -271,11 +278,15 @@ release-branch behaviour.
 
 ### Format Source Code
 
-Quick format and spelling check before committing:
+CI checks the PR merged onto latest `main`, so merge `origin/main` before pushing.
 
 ```bash
-tools/local_fix_format.sh          # uncommitted changes (default)
-tools/local_fix_format.sh -main    # all changes since main
+FILES=$(git diff --name-only $(git merge-base origin/main HEAD))  # not -main: uses stale local main
+tools/local_fix_format.sh $FILES                                  # clang-format, buildifier, proto style
+bazel test //tools/code:check_test --test_output=errors           # changelog, yamllint, flake8, shellcheck, ...
+bazel run //tools/spelling:check_spelling_pedantic -- --mark check --target_root="$PWD"  # local_fix_format skips spelling for file lists
+tools/proto_format/proto_format.sh check                          # if api/ changed
+./ci/run_envoy_docker.sh './ci/do_ci.sh format'                   # exact CI, slow
 ```
 
 For individual files:
