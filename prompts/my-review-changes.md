@@ -13,13 +13,17 @@ If the focus is `security`, run only angles 2, 3 and 5, and report only Confirme
 
 ## 1. Get the code and context
 
-Output directory, set it again in each shell command that uses it:
-`O=${TMPDIR:-/tmp}/agent-output/$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null | tr / _ | grep . || basename "$PWD")`
+Output directories, set them again in each shell command that uses them:
+`R=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null | tr / _ | grep . || basename "$PWD"); O=$HOME/.local/state/agent-output/$R; S=/tmp/agent-output/$R`
+
+- `$O` is kept across reboots. It holds `architecture.md`, the report, and in `$O/reviews/<target>/` the files needed to repeat any test you ran: scripts, manifests, test inputs, patches, and small captured output used as evidence.
+- `$S` is scratch. It holds worktrees, built binaries, generated certificates and keys, downloaded logs, and anything over about 1 MB that is not evidence for a finding.
+- Scripts take the scratch location from a variable instead of hardcoding it, and generate test certificates and keys at setup instead of storing them. Record the commit SHAs and build commands for any binary you build, so it can be rebuilt.
 
 Use the target from the arguments. Without one, review committed and uncommitted changes against the default branch (`git rev-parse --abbrev-ref origin/HEAD`, else `main` or `master`). Use `-W` so each hunk includes its whole enclosing function. Drop `-W` if the diff gets too large.
 
 - PR: `gh pr view N --json number,title,body,baseRefName,state,isDraft,url`. Check it out in a worktree so the user's checkout stays untouched:
-  `WT=$O/worktrees/pr-N; git worktree add --detach "$WT" && cd "$WT" && gh pr checkout N --detach`. Then run `git diff -W $(git merge-base origin/<base> HEAD)`. When done, run `git worktree remove "$WT"`.
+  `WT=$S/worktrees/pr-N; git worktree add --detach "$WT" && cd "$WT" && gh pr checkout N --detach`. Then run `git diff -W $(git merge-base origin/<base> HEAD)`. When done, run `git worktree remove "$WT"`.
 - Branch: `git diff -W $(git merge-base <base> <branch>) <branch>`. Commits: `git diff -W A..B` or `git show -W <sha>`.
 - Local work: `git diff -W $(git merge-base <base> HEAD)`, plus the untracked files from `git status --short`, read whole. In a repo with no commits, use `git diff -W --cached` plus the untracked files.
 - Paths, or no git: review the files as they are.
@@ -86,6 +90,7 @@ Always write the full report to `$O/reviews/<target>.md`, where target is `pr-N`
 - Findings, grouped by severity. Each has `path:line`, the claim, the failure scenario, a code excerpt and a suggested fix.
 - Compatibility: breaking API, config or format changes, or "None found".
 - Context checked: the review threads (addressed or not), CI status, the rules files read, the tests run, and what was not checked.
+- Reproduction: for each test you ran, the files in `$O/reviews/<target>/`, the commit SHAs and build commands, and how to run it again.
 
 Then show a short version in chat:
 

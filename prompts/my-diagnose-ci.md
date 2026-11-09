@@ -11,7 +11,7 @@ Shell variables may not persist between commands. Set them again in each command
 
 ```bash
 R=$(gh repo view --json nameWithOwner -q .nameWithOwner)    # or owner/repo from the arguments
-D=${TMPDIR:-/tmp}/agent-output/${R/\//_}/ci/pr-$N            # or .../ci/recent
+D=/tmp/agent-output/${R/\//_}/ci/pr-$N                       # or .../ci/recent
 rm -rf $D; mkdir -p $D
 ```
 

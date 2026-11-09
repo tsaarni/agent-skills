@@ -36,6 +36,7 @@
       "$HOME/sdk",
       "$HOME/.cache/go-build",
       "$XDG_STATE_HOME/runagent",
+      "$HOME/.local/state/agent-output",
       "/tmp",
       "/var/tmp",
       "$HOME/.cache/",

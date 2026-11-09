@@ -55,6 +55,7 @@
     pathMatch(path, "$HOME/.agents/**") ||
     pathMatch(path, "$HOME/storage/memory/**") ||
     pathMatch(path, "$HOME/.local/state/runagent/**") ||
+    pathMatch(path, "$HOME/.local/state/agent-output/**") ||
     pathMatch(path, "$HOME/.semantic_search/**") ||
     pathMatch(path, "$HOME/.wget-hsts") ||
     pathMatch(path, "$HOME/.docker/.token_seed") ||

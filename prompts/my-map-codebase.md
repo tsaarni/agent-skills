@@ -8,7 +8,7 @@ Produce a compact, evidence-backed architecture overview of the current codebase
 Focus: $ARGUMENTS (if empty, the whole repository)
 
 Output directory, set it again in each shell command that uses it:
-`O=${TMPDIR:-/tmp}/agent-output/$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null | tr / _ | grep . || basename "$PWD")`
+`O=$HOME/.local/state/agent-output/$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null | tr / _ | grep . || basename "$PWD")`
 
 Priorities: signal density; code/config evidence over prose docs; trust boundaries, runtime entry points, privileged paths and external dependencies; no filler or repeated caveats.
 
