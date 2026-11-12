@@ -41,6 +41,7 @@
     pathMatch(path, "$HOME/.local/share/pnpm/**") ||
     pathMatch(path, "$HOME/.docker/buildx/**")
 
+
 - name: tool-state
   action: [write, delete]
   verdict: allow
@@ -50,8 +51,6 @@
     pathMatch(path, "$HOME/.config/pnpm/**") ||
     pathMatch(path, "$HOME/.config/uv/**") ||
     pathMatch(path, "$HOME/.kube/cache/**") ||
-    pathMatch(path, "$HOME/.kiro/**") ||
-    pathMatch(path, "$HOME/.local/share/kiro-cli/**") ||
     pathMatch(path, "$HOME/.agents/**") ||
     pathMatch(path, "$HOME/storage/memory/**") ||
     pathMatch(path, "$HOME/.local/state/runagent/**") ||
@@ -59,8 +58,50 @@
     pathMatch(path, "$HOME/.semantic_search/**") ||
     pathMatch(path, "$HOME/.wget-hsts") ||
     pathMatch(path, "$HOME/.docker/.token_seed") ||
-    pathMatch(path, "$HOME/.docker/.token_seed.lock") ||
+    pathMatch(path, "$HOME/.docker/.token_seed.lock")
+
+
+# Kiro's runtime state: sessions, logs, its database, caches and locks.
+# Agent configs (~/.kiro/agents), settings (cli.json) and secrets.json are
+# left out so nothing in the sandbox can add hooks, MCP servers or tool
+# approvals. Runtime assets kiro runs on the next launch (bun, node, tui.js,
+# *.sha256, kas/<ver>/**, run/chat-cli-*) are also left out: update and
+# unpack them outside the sandbox.
+- name: kiro-state
+  action: [write, delete]
+  verdict: allow
+  match: >
+    pathMatch(path, "$HOME/.kiro/sessions/**") ||
+    pathMatch(path, "$HOME/.kiro/session-index/**") ||
+    pathMatch(path, "$HOME/.kiro/session-leases/**") ||
+    pathMatch(path, "$HOME/.kiro/logs/**") ||
+    pathMatch(path, "$HOME/.kiro/workspace-roots/**") ||
+    pathMatch(path, "$HOME/.kiro/cloud-cache/**") ||
+    pathMatch(path, "$HOME/.kiro/enterprise-management/**") ||
+    pathMatch(path, "$HOME/.kiro/settings/feed_state.json*") ||
+    pathMatch(path, "$HOME/.kiro/settings/survey_state.json*") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/data.sqlite3*") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/feed*") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/.tmp*") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/*.lock") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/.*.lock") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/kas/*.lock") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/run/.*.heartbeat") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/run/turn-markers/**") ||
+    pathMatch(path, "$HOME/.local/share/kiro-cli/run-receipts/**") ||
     pathMatch(path, "/run/user/*/kiro-log/**")
+
+# kiro-cli rewrites bun's config on every launch before starting the TUI.
+# A bun config can preload scripts. Limiting this to kiro-cli keeps shell
+# commands from writing it. It does not keep out kiro's built-in file write
+# tool, which runs inside the kiro-cli process.
+- name: allow-kiro-to-write-bunfig
+  action: [write, delete]
+  verdict: allow
+  match: >
+    process.exe == "$HOME/.local/bin/kiro-cli" &&
+    pathMatch(path, "$HOME/.local/share/kiro-cli/bunfig.toml")
+
 
 # The kubeconfig holds credentials. Only the Kubernetes CLIs may update it
 # (context switches, kind/minikube cluster creation). The .lock file is
