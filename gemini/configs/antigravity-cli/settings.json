@@ -86,7 +86,9 @@
       "command(md5)",
       "command(regex:^brew\\s+(list|info|search|deps|services\\s+list|--version)\\b.*)",
       "command(golangci-lint)",
-      "command(gofmt)"
+      "command(gofmt)",
+      "command(mdfind)",
+      "command(regex:^npm\\s+(list|ls|view|info|show|search|outdated|root|prefix|bin|explain|why|config\\s+(list|get)|--version|-v)\\b.*)"
     ]
   },
   "screenBuffer": "never",
