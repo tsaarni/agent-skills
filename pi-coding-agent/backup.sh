@@ -21,6 +21,10 @@ for rel_path in "${CONFIG_FILES[@]}"; do
   dest="${TARGET_DIR}/${rel_path}"
 
   if [[ -f "${src}" ]]; then
+    if [[ -e "${dest}" && "${src}" -ef "${dest}" ]]; then
+      echo "  [SKIP] ${rel_path} (linked to target)"
+      continue
+    fi
     mkdir -p "$(dirname "${dest}")"
     if [[ "${rel_path}" == "agent/settings.json" ]]; then
       # Scrub machine home paths
