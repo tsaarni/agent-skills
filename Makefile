@@ -8,5 +8,7 @@ install:
 	@claude/install.sh
 
 backup:
-	cp ~/.kiro/agents/*.json kiro/agents/
-	cp ~/.config/gravelpit/policies/* sandboxes/gravelpit/policies/
+	@gemini/backup.sh
+	@pi-coding-agent/backup.sh
+	@kiro/backup.sh
+	@sandboxes/gravelpit/backup.sh

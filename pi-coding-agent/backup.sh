@@ -6,7 +6,6 @@ TARGET_DIR="${SCRIPT_DIR}/configs"
 SOURCE_BASE="${HOME}/.pi"
 
 CONFIG_FILES=(
-  "agent/AGENTS.md"
   "agent/APPEND_SYSTEM.md"
   "agent/keybindings.json"
   "agent/mcp.json"
