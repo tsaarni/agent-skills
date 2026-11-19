@@ -115,7 +115,13 @@ LEGACY_ALWAYSLINK = 1
 ### Build
 
 ```bash
-bazel build -c fastbuild //source/exe:envoy-static
+runagent run -n envoy-build --cwd ~/work/envoy -- bazel build -c fastbuild //source/exe:envoy-static; runagent wait envoy-build; runagent logs envoy-build --last 20
+```
+
+Tests the same way:
+
+```bash
+runagent run -n envoy-test --cwd ~/work/envoy -- bazel test -c fastbuild <targets> --test_output=errors; runagent wait envoy-test; runagent logs envoy-test --last 40
 ```
 
 Binary at `bazel-bin/source/exe/envoy-static`.
@@ -281,24 +287,25 @@ release-branch behaviour.
 CI checks the PR merged onto latest `main`, so merge `origin/main` before pushing.
 
 ```bash
-FILES=$(git diff --name-only $(git merge-base origin/main HEAD))  # not -main: uses stale local main
-tools/local_fix_format.sh $FILES                                  # clang-format, buildifier, proto style
-bazel test //tools/code:check_test --test_output=errors           # changelog, yamllint, flake8, shellcheck, ...
-bazel run //tools/spelling:check_spelling_pedantic -- --mark check --target_root="$PWD"  # local_fix_format skips spelling for file lists
-tools/proto_format/proto_format.sh check                          # if api/ changed
-./ci/run_envoy_docker.sh './ci/do_ci.sh format'                   # exact CI, slow
+runagent run -n envoy-format --cwd ~/work/envoy -- bash -c 'FILES=$(git diff --name-only $(git merge-base origin/main HEAD)); tools/local_fix_format.sh $FILES; bazel test //tools/code:check_test --test_output=errors; bazel run //tools/spelling:check_spelling_pedantic -- --mark check --target_root="$PWD"; tools/proto_format/proto_format.sh check'; runagent wait envoy-format; runagent logs envoy-format --last 40
+```
+
+Exact CI (slow):
+
+```bash
+runagent run -n envoy-format-ci --cwd ~/work/envoy -- ./ci/run_envoy_docker.sh './ci/do_ci.sh format'; runagent wait envoy-format-ci; runagent logs envoy-format-ci --last 40
 ```
 
 For individual files:
 
 ```bash
-bazel run //tools/code_format:check_format -- fix <directrory>
+runagent run -n envoy-format --cwd ~/work/envoy -- bazel run //tools/code_format:check_format -- fix <directory>; runagent wait envoy-format; runagent logs envoy-format --last 20
 ```
 
 Or if you just want clang-format on those specific files without the full checker:
 
 ```bash
-bazel run @llvm_toolchain_llvm//:bin/clang-format -- -i <file1> <file2> ...
+runagent run -n envoy-format --cwd ~/work/envoy -- bazel run @llvm_toolchain_llvm//:bin/clang-format -- -i <file1> <file2> ...; runagent wait envoy-format; runagent logs envoy-format --last 20
 ```
 
 ### CI
@@ -314,38 +321,25 @@ Envoy CI runs through the `ci-envoy` GitHub App. The `Request` workflow runs on 
 
 ### Build Documentation Locally
 
-Build and serve the Sphinx docs to preview changelog entries, API docs, etc.
-
-**Gotcha:** `docs/.bazelrc` does `try-import ../user.bazelrc`, which pulls in
-`--//bazel:http3=False`. That flag doesn't exist in the docs Bazel module and breaks the
-build. Workaround: temporarily remove the line before building, restore after.
+`docs/.bazelrc` imports `../user.bazelrc`, whose `--//bazel:http3=False` breaks the docs build. The command strips that line for the duration of the build and restores it afterwards.
 
 ```bash
-cd ~/work/envoy
-cp user.bazelrc user.bazelrc.bak
-grep -v "http3" user.bazelrc > user.bazelrc.tmp && mv user.bazelrc.tmp user.bazelrc
-
-cd docs && bazel build //:html
-
-cp ../user.bazelrc.bak ../user.bazelrc
+runagent run -n envoy-docs-build --cwd ~/work/envoy -- bash -c 'cp user.bazelrc user.bazelrc.bak; trap "mv user.bazelrc.bak user.bazelrc" EXIT; grep -v http3 user.bazelrc.bak > user.bazelrc; cd docs && bazel build //:html'; runagent wait envoy-docs-build; runagent logs envoy-docs-build --last 20
 ```
 
-**Serve:** The output `docs/bazel-bin/html.tar.gz` is a plain tar (not gzipped, despite the
-name):
+Serve:
 
 ```bash
-rm -rf /tmp/envoy-docs && mkdir -p /tmp/envoy-docs
-tar xf ~/work/envoy/docs/bazel-bin/html.tar.gz -C /tmp/envoy-docs
-runagent run -n envoy-docs-server -- python3 -m http.server 8888 --directory /tmp/envoy-docs
+rm -rf /tmp/envoy-docs && mkdir -p /tmp/envoy-docs && tar xf ~/work/envoy/docs/bazel-bin/html.tar.gz -C /tmp/envoy-docs && runagent run -n envoy-docs-server -- python3 -m http.server 8888 --directory /tmp/envoy-docs; runagent logs envoy-docs-server --last 5
 ```
 
-Browse `http://localhost:8888`. Changelog at
-`http://localhost:8888/version_history/v1.40/v1.40.0.html`.
+- API: `http://localhost:8888/api-v3/<path under api/envoy/>.proto.html`
+- Changelog: `http://localhost:8888/version_history/version_history.html` → current version
 
 ### Generate `compile_commands.json` for vscode
 
 ```bash
-./tools/gen_compilation_database.py --vscode --exclude_contrib
+runagent run -n envoy-compdb --cwd ~/work/envoy -- ./tools/gen_compilation_database.py --vscode --exclude_contrib; runagent wait envoy-compdb; runagent logs envoy-compdb --last 20
 ```
 
 ## Testing Envoy Locally
