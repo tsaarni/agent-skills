@@ -17,26 +17,6 @@ If only the JDWP port of a JVM is reachable (no shell, no JMX), read [references
 Find the PID with `jcmd -l` (or `jps -l`).
 In scripts, take care with `pgrep -f <name>`: it also matches the shell running the command, and two PIDs given to `jcmd` fail with `Unknown diagnostic command`.
 
-## Practice target
-
-[scripts/DebugTarget.java](./scripts/DebugTarget.java) is a small HTTP server with one known behaviour per endpoint, to try the tools on:
-
-| Endpoint | Behaviour |
-|---|---|
-| `/iterate`, `/remove?key=k3`, `/reset` | HashMap race: `/iterate` loops over a shared map, `/remove` changes it without locking |
-| `/cpu?n=30` | CPU work, recursive `fib(n)` |
-| `/alloc?mb=10&retain=true` | Allocation; with `retain=true` a leak |
-| `/lock?ms=100` | Holds a shared monitor (lock contention) |
-| `/fail` | Throws, returns 500 |
-
-```bash
-mkdir -p /tmp/debug-target
-javac -g -d /tmp/debug-target <skill-dir>/scripts/DebugTarget.java
-runagent run -n debug-target -- java \
-  -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=localhost:5006 \
-  -cp /tmp/debug-target DebugTarget 8081
-```
-
 ---
 
 # Debugger (jdb)
@@ -70,12 +50,12 @@ It waits for the jdb prompt after each command, so commands and output stay in s
 pysess new -t 30 <<'EOF'
 import threading, urllib.request
 exec(open("<skill-dir>/scripts/jdb_driver.py").read())
-j = Jdb("localhost:5006")
+j = Jdb("localhost:5005")
 res = {}
 def bg(name, fn):
     threading.Thread(target=lambda: res.__setitem__(name, fn()), daemon=True).start()
 def get(path):
-    with urllib.request.urlopen("http://127.0.0.1:8081" + path, timeout=120) as r:
+    with urllib.request.urlopen("http://127.0.0.1:8080" + path, timeout=120) as r:
         return r.status, r.read().decode()
 EOF
 ```
@@ -100,12 +80,12 @@ Send the request from a background thread (`bg`), then call `wait_hit()`.
 Give the client a timeout longer than you will spend inspecting: if it times out, the server finishes the request after resume, but the response is lost.
 
 ```python
-j.cmd("stop thread in DebugTarget.visit")
-bg("iterate", lambda: get("/iterate"))
+j.cmd("stop thread in com.example.OrderService.place")
+bg("order", lambda: get("/orders/1"))
 print(j.wait_hit())
 print(j.where(4))
 print(j.cmd("locals"))
-j.cmd("clear DebugTarget.visit")
+j.cmd("clear com.example.OrderService.place")
 j.cont()
 ```
 
@@ -199,21 +179,26 @@ Do not use `hashCode()` of collections: it is computed from the content.
 ## Workflow: force a race
 
 Breakpoints that suspend only one thread let you choose the interleaving, instead of running many requests and hoping for a failure.
-Example with DebugTarget (verified, gives HTTP 500 every time):
+
+1. Set `stop thread in` at a method that runs while thread A holds the shared state (for example inside an iteration loop).
+2. Trigger A with `bg`. Use `j.collect(...)` to let it run until it reaches the point you want, then `clear` the breakpoint. A stays suspended.
+3. Run the conflicting request (thread B) in the foreground. It completes while A waits.
+4. Set `catch caught <Exception>` for the failure you expect, then `j.cont()` to resume A.
+5. `j.wait_hit()` and `j.where(5)` show the stack at the throw. All threads are suspended now.
+6. `ignore caught <Exception>`, `j.cmd("resume")`, then read A's response from `res`.
 
 ```python
-get("/reset")
-j.cmd("stop thread in DebugTarget.visit")       # thread A stops inside the loop
-bg("iterate", lambda: get("/iterate"))
+j.cmd("stop thread in com.example.Registry.visit")
+bg("a", lambda: get("/iterate"))
 j.collect(["e.getKey()"], count=20, keep=lambda v: v[0] == '"k5"')
-j.cmd("clear DebugTarget.visit")
-print(get("/remove?key=k8"))                     # thread B changes the map while A waits
+j.cmd("clear com.example.Registry.visit")
+print(get("/remove?key=k8"))
 j.cmd("catch caught java.util.ConcurrentModificationException")
-j.cont()                                         # A continues and its iterator fails
-print(j.wait_hit()); print(j.where(5))           # stack at the throw, all threads suspended
+j.cont()
+print(j.wait_hit()); print(j.where(5))
 j.cmd("ignore caught java.util.ConcurrentModificationException")
 j.cmd("resume")
-print(res["iterate"])                            # (500, 'java.util.ConcurrentModificationException')
+print(res["a"])
 ```
 
 ## Recovery
@@ -302,8 +287,8 @@ Load generators (see the echoclient skill; `ab` also works):
 
 ```bash
 go run github.com/tsaarni/echoclient/cmd/echoclient@latest get \
-  -url "http://127.0.0.1:8081/cpu?n=24" -concurrency 4 -duration 30s
-ab -n 1000 -c 4 "http://127.0.0.1:8081/alloc?mb=4"
+  -url "http://127.0.0.1:8080/api/items" -concurrency 4 -duration 30s
+ab -n 1000 -c 4 "http://127.0.0.1:8080/api/items"
 ```
 
 ## Access from another host

@@ -12,22 +12,68 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Small HTTP server to practise jdb and JVM diagnostics on. Each endpoint has one known behaviour:
+ * Test target for the java-debugging skill: a small HTTP server where each endpoint has one known
+ * behaviour, so jdb, jcmd, jstat and JFR commands can be checked against a known result before
+ * using them on a real application.
+ *
+ * Endpoints (port given as first argument, default 8081):
  *
  *   /iterate        iterates the shared HashMap, calls visit() once per entry
  *   /remove?key=k3  removes an entry from the shared HashMap (no locking: race with /iterate)
- *   /reset          refills the shared HashMap
+ *   /reset          refills the shared HashMap with k0..k9
  *   /cpu?n=30       CPU work, recursive fib(n)
- *   /alloc?mb=10&retain=true   allocates 1 MB arrays, optionally keeps them (leak)
+ *   /alloc?mb=10&retain=true   allocates 1 MB arrays; retain=true keeps them (leak)
  *   /lock?ms=100    holds a shared monitor for ms (lock contention)
  *   /fail           throws IllegalStateException, returns 500
+ *   anything else   returns "ok"
  *
- * Every request increments the static field `requests` (watchpoint target).
+ * Every request increments the static field `requests` (watchpoint target: watch DebugTarget.requests).
+ * Worker threads are named worker-1..worker-8.
  *
- * Build and run (see SKILL.md):
- *   javac -g -d /tmp/debug-target DebugTarget.java
- *   java -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=localhost:5006 \
- *        -cp /tmp/debug-target DebugTarget 8081
+ * Build and run with JDWP on localhost:5006 (-g keeps local variable names for jdb):
+ *
+ *   mkdir -p /tmp/debug-target
+ *   javac -g -d /tmp/debug-target <skill-dir>/scripts/DebugTarget.java
+ *   runagent run -n debug-target -- java \
+ *       -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=localhost:5006 \
+ *       -cp /tmp/debug-target DebugTarget 8081
+ *   curl http://127.0.0.1:8081/      # prints "ok"
+ *   PID=$(jcmd -l | awk '/DebugTarget/ {print $1}')
+ *
+ * jdb session (pysess, using scripts/jdb_driver.py; adjust the SKILL.md setup to these ports):
+ *
+ *   j = Jdb("localhost:5006")     # get() must use http://127.0.0.1:8081
+ *
+ * Forcing the /iterate vs /remove race (verified on JDK 25, gives HTTP 500 every time):
+ *
+ *   get("/reset")
+ *   j.cmd("stop thread in DebugTarget.visit")       # thread A stops inside the loop
+ *   bg("iterate", lambda: get("/iterate"))
+ *   j.collect(["e.getKey()"], count=20, keep=lambda v: v[0] == '"k5"')
+ *   j.cmd("clear DebugTarget.visit")
+ *   print(get("/remove?key=k8"))                     # thread B changes the map while A waits
+ *   j.cmd("catch caught java.util.ConcurrentModificationException")
+ *   j.cont()                                         # A continues and its iterator fails
+ *   print(j.wait_hit()); print(j.where(5))           # stack at the throw, all threads suspended
+ *   j.cmd("ignore caught java.util.ConcurrentModificationException")
+ *   j.cmd("resume")
+ *   print(res["iterate"])                            # (500, 'java.util.ConcurrentModificationException')
+ *
+ * Expected results with the metrics tools (verified on JDK 25, recording with settings=profile):
+ *
+ *   ab -n 300 -c 4 "http://127.0.0.1:8081/cpu?n=24"
+ *       jfr view hot-methods: DebugTarget.fib(int) on top
+ *   ab -n 40 -c 8 "http://127.0.0.1:8081/lock?ms=200"
+ *       jcmd $PID Thread.print (during load): workers BLOCKED, "waiting to lock" in DebugTarget.locked
+ *       jfr view contention-by-site: DebugTarget.locked(long)
+ *   ab -n 40 -c 2 "http://127.0.0.1:8081/alloc?mb=2&retain=true"
+ *       jcmd $PID GC.class_histogram: [B (byte[]) on top, grows per request
+ *       jfr view memory-leaks-by-site: DebugTarget.alloc(int, boolean); use the SKILL.md leak recipe
+ *       (JFR.start ... memory-leaks=gc-roots, then JFR.dump filename=...)
+ *   curl http://127.0.0.1:8081/fail
+ *       jfr view exception-by-site: DebugTarget.handle(HttpExchange)
+ *
+ * The retained arrays stay until the JVM exits. Stop with: runagent delete debug-target
  */
 public class DebugTarget {
 
