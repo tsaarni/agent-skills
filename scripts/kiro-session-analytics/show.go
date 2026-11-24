@@ -71,6 +71,9 @@ func turnHeader(s *Session, t *Turn) string {
 	usage := "no usage data"
 	if t.Metered {
 		usage = fmtCredits(t.Credits) + " credits"
+		if t.SubagentCredits > 0 {
+			usage += " (" + fmtCredits(t.SubagentCredits) + " by subagents)"
+		}
 	}
 	model := t.Model
 	if model == "" {
@@ -80,17 +83,65 @@ func turnHeader(s *Session, t *Turn) string {
 		shortID(s.ID), t.Index, t.Start.Format("2006-01-02 15:04"), wsBase(s.Workspace), model, usage, fmtDur(t.Duration))
 }
 
+// requestSummary describes the turn's requests and its cold ones, or returns
+// "" when the turn has no per-request data.
+func requestSummary(t *Turn) string {
+	if len(t.Requests) == 0 {
+		return ""
+	}
+	var cold int
+	var coldCredits float64
+	for _, r := range t.Requests {
+		if r.Cold() {
+			cold++
+			coldCredits += r.Credits
+		}
+	}
+	s := fmt.Sprintf("   %d requests", len(t.Requests))
+	if cold > 0 {
+		s += fmt.Sprintf(", %d cold (%s): %s credits", cold, coldLabel(), fmtCredits(coldCredits))
+	}
+	return s
+}
+
+// printTurn prints the prompt, then each request followed by the tool calls
+// it made, then the response. Without per-request data, only the tool calls
+// are listed.
 func printTurn(w io.Writer, s *Session, t *Turn, outputLines int) {
 	fmt.Fprintln(w, turnHeader(s, t))
+	if sum := requestSummary(t); sum != "" {
+		fmt.Fprintln(w, sum)
+	}
 	if t.Prompt != "" {
 		fmt.Fprintln(w, prefixLines(t.Prompt, "> "))
 	}
-	for _, tc := range t.Tools {
+	// A request is logged right after the tool calls it made, so the calls
+	// made up to a request's time belong to it.
+	next := 0
+	for _, r := range t.Requests {
+		printRequest(w, r)
+		for next < len(t.Tools) && !t.Tools[next].Time.After(r.Time) {
+			printTool(w, t.Tools[next], s.Workspace, outputLines)
+			next++
+		}
+	}
+	for _, tc := range t.Tools[next:] {
 		printTool(w, tc, s.Workspace, outputLines)
 	}
 	if t.Response != "" {
 		fmt.Fprintln(w, prefixLines(t.Response, "< "))
 	}
+}
+
+func printRequest(w io.Writer, r Request) {
+	line := fmt.Sprintf("= request   %.2f credits", r.Credits)
+	if r.Context >= 0 {
+		line += fmt.Sprintf("   context %.1f%%", r.Context)
+	}
+	if r.Cold() {
+		line += fmt.Sprintf("   cold: %s after the previous request", fmtDur(r.Gap))
+	}
+	fmt.Fprintln(w, line)
 }
 
 func printTool(w io.Writer, tc ToolCall, workspace string, outputLines int) {
@@ -161,9 +212,9 @@ func printSessionSummary(w io.Writer, s *Session) {
 		credits, req, perReq := "-", "-", "-"
 		if t.Metered {
 			credits = fmtCredits(t.Credits)
-			if t.Requests > 0 {
-				req = fmt.Sprintf("%d", t.Requests)
-				perReq = fmt.Sprintf("%.2f", t.Credits/float64(t.Requests))
+			if t.RequestCount > 0 {
+				req = fmt.Sprintf("%d", t.RequestCount)
+				perReq = fmt.Sprintf("%.2f", t.Credits/float64(t.RequestCount))
 			}
 		}
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",

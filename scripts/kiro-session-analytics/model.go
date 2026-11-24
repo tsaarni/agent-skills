@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -48,18 +49,52 @@ type Turn struct {
 	// Metered is false when the engine logged no usage for the turn, so zero
 	// credits means "unknown" rather than "free".
 	Metered bool
-	// Requests is the number of model requests made during the turn; 0 means
-	// the engine did not log it.
-	Requests int
-	Prompt   string
-	Response string
-	Tools    []ToolCall
+	// RequestCount is the number of model requests made during the turn; 0
+	// means the engine did not log it.
+	RequestCount int
+	// Requests holds the cost of each main-agent request. Only newer v3
+	// sessions log it; empty otherwise. The request credits plus
+	// SubagentCredits add up to Credits, apart from small auxiliary charges.
+	Requests []Request
+	// SubagentCredits is the part of Credits spent by subagents. Logged
+	// together with Requests.
+	SubagentCredits float64
+	Prompt          string
+	Response        string
+	Tools           []ToolCall
+}
+
+// coldGap is the time since the previous request after which a request is
+// counted as cold. Such requests cost about three times as much; the likely
+// cause is that the model's prompt cache has expired (not logged, inferred).
+const coldGap = 5 * time.Minute
+
+// Request is one model request of the main agent.
+type Request struct {
+	Time    time.Time // when the request finished
+	Credits float64
+	// Gap is the time since the previous request of the session finished;
+	// 0 for the first request.
+	Gap time.Duration
+	// Context is the context window usage in percent after the request; -1
+	// when not logged.
+	Context float64
+}
+
+// Cold reports whether the request came more than coldGap after the
+// previous one.
+func (r Request) Cold() bool { return r.Gap > coldGap }
+
+// coldLabel describes the cold threshold for output.
+func coldLabel() string {
+	return fmt.Sprintf("more than %.0f min after the previous request", coldGap.Minutes())
 }
 
 type ToolCall struct {
-	Name    string // raw tool name
-	Kind    string // see Kind* constants
-	Command string // shell only
+	Time    time.Time // when the call was made; zero when not logged
+	Name    string    // raw tool name
+	Kind    string    // see Kind* constants
+	Command string    // shell only
 	Cwd     string
 	Paths   []string // files read or written
 	Status  string   // ok | failed | denied

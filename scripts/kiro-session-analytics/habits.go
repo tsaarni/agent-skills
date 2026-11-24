@@ -278,11 +278,11 @@ func buildLength(refs []turnRef) *lengthReport {
 		row.Metered++
 		row.Credits += r.T.Credits
 		rep.Credits += r.T.Credits
-		if r.T.Requests == 0 {
+		if r.T.RequestCount == 0 {
 			continue
 		}
 		row.ReqTurns++
-		row.Requests += r.T.Requests
+		row.Requests += r.T.RequestCount
 		row.ReqCredits += r.T.Credits
 
 		m := r.T.Model
@@ -297,7 +297,7 @@ func buildLength(refs []turnRef) *lengthReport {
 		mr.Credits += r.T.Credits
 		c := &mr.Cells[colOf(r.T.Index)]
 		c.Turns++
-		c.Requests += r.T.Requests
+		c.Requests += r.T.RequestCount
 		c.ReqCredits += r.T.Credits
 	}
 

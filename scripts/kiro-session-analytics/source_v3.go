@@ -122,6 +122,35 @@ type v3Payload struct {
 	RequestIDs  []string `json:"requestIds"`
 	ElapsedTime float64  `json:"elapsedTime"`
 	StopReason  string   `json:"stopReason"`
+
+	// session_metadata
+	Key   string          `json:"key"`
+	Value json.RawMessage `json:"value"`
+}
+
+// v3MetaValue is the value of the session_metadata keys that are read.
+type v3MetaValue struct {
+	// creditSplit: running session totals, logged after each request.
+	Main      *float64 `json:"main"`
+	Delegated float64  `json:"delegated"`
+	// contextUsage
+	UsagePercentage *float64 `json:"usagePercentage"`
+}
+
+// v3Credits tracks the running creditSplit totals of a session.
+type v3Credits struct {
+	main, delegated float64
+	last            time.Time // when the previous main request finished
+	ctxPending      bool      // the last request still awaits its contextUsage
+}
+
+// delta returns how much a running total grew. A total that went down was
+// reset, so its new value is the growth.
+func delta(prev, cur float64) float64 {
+	if cur < prev {
+		return cur
+	}
+	return cur - prev
 }
 
 // v3Turn is a turn under construction.
@@ -150,6 +179,7 @@ func (s *v3Source) Load(h SessionHeader, opt LoadOpts) (*Session, error) {
 
 	var turns []*v3Turn
 	var cur *v3Turn
+	var cs v3Credits
 	pendingUser := map[string]string{}
 	lastUser := ""
 	lastModel := h.Model
@@ -203,7 +233,7 @@ func (s *v3Source) Load(h SessionHeader, opt LoadOpts) (*Session, error) {
 			}
 			tc := cur.byID[p.ToolCallID]
 			if tc == nil {
-				tc = &ToolCall{}
+				tc = &ToolCall{Time: ts}
 				cur.tools = append(cur.tools, tc)
 				if p.ToolCallID != "" {
 					cur.byID[p.ToolCallID] = tc
@@ -227,7 +257,7 @@ func (s *v3Source) Load(h SessionHeader, opt LoadOpts) (*Session, error) {
 				cur.Credits += sm.Usage
 				cur.Metered = true
 			}
-			cur.Requests += len(p.RequestIDs)
+			cur.RequestCount += len(p.RequestIDs)
 			if p.ElapsedTime > 0 {
 				cur.Duration = time.Duration(p.ElapsedTime * float64(time.Millisecond))
 				cur.timed = true
@@ -237,6 +267,8 @@ func (s *v3Source) Load(h SessionHeader, opt LoadOpts) (*Session, error) {
 				return
 			}
 			cur.End = ts
+		case "session_metadata":
+			applyV3Meta(cur, &cs, p, ts)
 		}
 	})
 	if err != nil {
@@ -260,6 +292,49 @@ func (s *v3Source) Load(h SessionHeader, opt LoadOpts) (*Session, error) {
 		sess.Turns = append(sess.Turns, t.Turn)
 	}
 	return sess, nil
+}
+
+// applyV3Meta turns the running creditSplit totals into per-request costs of
+// the current turn, and attaches the contextUsage logged right after a
+// request to it. Growth of the main total is one main-agent request; growth
+// of the delegated total is subagent spend.
+func applyV3Meta(cur *v3Turn, cs *v3Credits, p *v3Payload, ts time.Time) {
+	if p.Key != "creditSplit" && p.Key != "contextUsage" {
+		return
+	}
+	var v v3MetaValue
+	if json.Unmarshal(p.Value, &v) != nil {
+		return
+	}
+	switch p.Key {
+	case "creditSplit":
+		if v.Main == nil {
+			return
+		}
+		dMain := delta(cs.main, *v.Main)
+		dDeleg := delta(cs.delegated, v.Delegated)
+		cs.main, cs.delegated = *v.Main, v.Delegated
+		if cur != nil {
+			cur.SubagentCredits += dDeleg
+		}
+		if dMain <= 0 {
+			return
+		}
+		if cur != nil {
+			r := Request{Time: ts, Credits: dMain, Context: -1}
+			if !cs.last.IsZero() {
+				r.Gap = ts.Sub(cs.last)
+			}
+			cur.Requests = append(cur.Requests, r)
+			cs.ctxPending = true
+		}
+		cs.last = ts
+	case "contextUsage":
+		if cs.ctxPending && cur != nil && len(cur.Requests) > 0 && v.UsagePercentage != nil {
+			cur.Requests[len(cur.Requests)-1].Context = *v.UsagePercentage
+		}
+		cs.ctxPending = false
+	}
 }
 
 func fillV3Call(tc *ToolCall, p *v3Payload) {

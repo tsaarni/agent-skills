@@ -43,6 +43,14 @@ type spendReport struct {
 	Unmetered int
 	Rows      []spendRow
 	TopTurns  []spendTop
+
+	// From the turns with usage data that also have per-request data.
+	ReqTurns        int
+	ColdRequests    int
+	ColdCredits     float64
+	ColdMedian      float64 // credits per cold request
+	WarmMedian      float64 // credits per other request
+	SubagentCredits float64 // part of Credits
 }
 
 var spendGroups = []string{"workspace", "model", "agent", "day", "session"}
@@ -128,9 +136,9 @@ func groupSpend(refs []turnRef, by string) []spendRow {
 		}
 		row.Turns++
 		row.Credits += r.T.Credits
-		if r.T.Requests > 0 {
+		if r.T.RequestCount > 0 {
 			row.ReqTurns++
-			row.Requests += r.T.Requests
+			row.Requests += r.T.RequestCount
 			row.ReqCredits += r.T.Credits
 		}
 	}
@@ -172,6 +180,7 @@ func buildSpend(refs []turnRef, by string) spendReport {
 		rep.To = refs[len(refs)-1].T.Start.Format("2006-01-02")
 	}
 	rep.Rows = groupSpend(refs, by)
+	addRequestStats(&rep, metered)
 
 	sort.SliceStable(metered, func(i, j int) bool { return metered[i].T.Credits > metered[j].T.Credits })
 	if len(metered) > topTurns {
@@ -191,6 +200,43 @@ func buildSpend(refs []turnRef, by string) spendReport {
 	return rep
 }
 
+// addRequestStats fills the cold request and subagent figures from the
+// per-request data of the metered turns.
+func addRequestStats(rep *spendReport, metered []turnRef) {
+	var cold, warm []float64
+	for _, r := range metered {
+		if len(r.T.Requests) == 0 {
+			continue
+		}
+		rep.ReqTurns++
+		rep.SubagentCredits += r.T.SubagentCredits
+		for _, q := range r.T.Requests {
+			if q.Cold() {
+				cold = append(cold, q.Credits)
+				rep.ColdCredits += q.Credits
+			} else {
+				warm = append(warm, q.Credits)
+			}
+		}
+	}
+	rep.ColdRequests = len(cold)
+	rep.ColdMedian = median(cold)
+	rep.WarmMedian = median(warm)
+}
+
+// median returns the median of xs, or 0 when empty. It sorts xs.
+func median(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	sort.Float64s(xs)
+	n := len(xs)
+	if n%2 == 1 {
+		return xs[n/2]
+	}
+	return (xs[n/2-1] + xs[n/2]) / 2
+}
+
 func printSpend(g *globals, rep spendReport) {
 	if rep.Turns == 0 && rep.Unmetered == 0 {
 		fmt.Fprintln(g.out, "No turns found in the selected period.")
@@ -200,6 +246,18 @@ func printSpend(g *globals, rep spendReport) {
 		rep.From, rep.To, fmtCredits(rep.Credits), rep.Turns, fmtCredits(rep.Avg))
 	if rep.Unmetered > 0 {
 		fmt.Fprintf(g.out, "(%d more turns have no usage data and are not counted)\n", rep.Unmetered)
+	}
+	if rep.ReqTurns > 0 {
+		fmt.Fprintf(g.out, "Per-request data for %d of %d turns: ", rep.ReqTurns, rep.Turns)
+		if rep.ColdRequests > 0 {
+			fmt.Fprintf(g.out, "%d cold requests (%s) cost %s credits, median %.2f per request against %.2f for the others.\n",
+				rep.ColdRequests, coldLabel(), fmtCredits(rep.ColdCredits), rep.ColdMedian, rep.WarmMedian)
+		} else {
+			fmt.Fprintf(g.out, "no cold requests (%s).\n", coldLabel())
+		}
+		if rep.SubagentCredits > 0 {
+			fmt.Fprintf(g.out, "Subagents: %s credits, included in the total.\n", fmtCredits(rep.SubagentCredits))
+		}
 	}
 	fmt.Fprintln(g.out)
 
