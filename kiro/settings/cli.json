@@ -1,0 +1,23 @@
+{
+  "chat.enableCodeIntelligence": true,
+  "chat.enableContextUsageIndicator": true,
+  "chat.enableKnowledge": false,
+  "chat.enableSubagent": true,
+  "chat.enableTangentMode": true,
+  "chat.enableThinking": true,
+  "chat.enableTodoList": true,
+  "codeWhisperer.shareCodeWhispererContentWithAWS": false,
+  "knowledge.defaultExcludePatterns": "[\\\"node_modules/**\\\", \\\"__pycache__/**\\\"]",
+  "knowledge.defaultIncludePatterns": "[\\\"**/*.md\\\", \\\"**/*.yml\\\", \\\"**/*.yaml\\\"]",
+  "knowledge.indexType": "Best",
+  "telemetry.enabled": false,
+  "chat.defaultAgent": "kiro",
+  "chat.ui": "tui",
+  "mcp.loadedBefore": true,
+  "chat.defaultModel": "claude-opus-5.5",
+  "chat.disableTrustAllConfirmation": true,
+  "chat.autoExpandToolOutput": false,
+  "chat.preserveScrollback": true,
+  "chat.enableAutoAgentUpgrade": true,
+  "chat.agentEngine": "v3"
+}
