@@ -16,6 +16,7 @@
   verdict: allow
   match: >
     pathMatch(path, "$HOME/work/**") ||
+    pathMatch(path, "$HOME/hobby/**") ||
     pathMatch(path, "$WORKDIR/**") ||
     pathMatch(path, "/tmp/**") ||
     pathMatch(path, "/var/tmp/**") ||

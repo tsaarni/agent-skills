@@ -42,21 +42,22 @@ Check that the port is open with `ss -ltnp | grep 5005`.
 
 ## Drive jdb from a persistent pysess session
 
-jdb is interactive and each bash call is a new process, so run jdb inside a pysess session (see the pysess skill).
-Load the helper [scripts/jdb_driver.py](./scripts/jdb_driver.py).
-It waits for the jdb prompt after each command, so commands and output stay in sync.
+jdb is interactive and each bash call is a new process, so run jdb inside a pysess session (see the [pysess skill](../pysess/SKILL.md)).
+Start the session with the helper [scripts/jdb_driver.py](./scripts/jdb_driver.py) loaded, then attach.
+The helper waits for the jdb prompt after each command, so commands and output stay in sync.
+It imports `pysess.bg`; if loading fails with `ImportError: cannot import name 'bg'`, upgrade pysess (`uv tool upgrade pysess`).
 
 ```bash
-pysess new -t 30 <<'EOF'
-import threading, urllib.request
-exec(open("<skill-dir>/scripts/jdb_driver.py").read())
+pysess new -n jdb <skill-dir>/scripts/jdb_driver.py
+pysess exec jdb -t 30 <<'EOF'
+import urllib.request, urllib.error
 j = Jdb("localhost:5005")
-res = {}
-def bg(name, fn):
-    threading.Thread(target=lambda: res.__setitem__(name, fn()), daemon=True).start()
 def get(path):
-    with urllib.request.urlopen("http://127.0.0.1:8080" + path, timeout=120) as r:
-        return r.status, r.read().decode()
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8080" + path, timeout=120) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:   # keep 4xx/5xx as a result, not an exception
+        return e.code, e.read().decode()
 EOF
 ```
 
@@ -74,19 +75,21 @@ EOF
 | `j.where(depth)` | Top of the stack of the current thread. |
 | `j.drain()` | Forget events printed so far. |
 | `j.cleanup()` | Clear breakpoints, resume all threads, detach. |
+| `bg(fn, *args)` | `pysess.bg`, imported by the driver: run `fn` in a daemon thread, return a `Future` (`done()`, `result(timeout)`). |
 
-A breakpoint blocks the request that hits it.
-Send the request from a background thread (`bg`), then call `wait_hit()`.
+A breakpoint blocks the request that hits it, and a pysess session runs one step at a time.
+Send the request with `bg`, then call `wait_hit()`; read the response later with `.result()`.
 Give the client a timeout longer than you will spend inspecting: if it times out, the server finishes the request after resume, but the response is lost.
 
 ```python
 j.cmd("stop thread in com.example.OrderService.place")
-bg("order", lambda: get("/orders/1"))
+order = bg(get, "/orders/1")
 print(j.wait_hit())
 print(j.where(4))
 print(j.cmd("locals"))
 j.cmd("clear com.example.OrderService.place")
 j.cont()
+print(order.result(timeout=10))
 ```
 
 ## Breakpoints and other events
@@ -115,7 +118,7 @@ Notes (verified on JDK 25):
 - `stop thread in` does not make the stopped thread current. Commands then fail with `No thread specified`. `j.wait_hit()` selects the thread from the event line.
 - After the breakpoint is cleared, `threads` no longer shows that thread as `at breakpoint`. Remember the thread from the event (`j.thread`).
 - `cont` answers `Nothing suspended` when only one thread is suspended and it is not current. `resume <thread_id>` always works; `j.cont()` does this.
-- Any method call in an expression (also `print obj`) leaves all threads suspended afterwards, even at a `stop thread` breakpoint: the target stops serving. `j.p()` resumes all other threads after each print. `locals`, `dump` and reads of primitive or String fields and variables do not need this.
+- Any method call in an expression (also `print obj`) leaves all threads suspended afterwards, even at a `stop thread` breakpoint: the target stops serving. It is a VM-wide suspend, so threads that start later (for example a new pool worker for the next request) also start suspended. Resuming threads one by one does not undo it; `resume` without arguments does. `j.p()` does `suspend <current>` then `resume`, so only the current thread stays stopped. `locals`, `dump` and reads of primitive or String fields and variables do not need this.
 - Method calls need a thread stopped by an event. After the `suspend` command, they fail with `Thread not suspended for method invoke`.
 - A `step` or `next` whose thread does not run (for example a parked pool thread) stays pending. It fires later, when that thread handles a request, and suspends all threads. Only detaching removes it.
 
@@ -185,11 +188,11 @@ Breakpoints that suspend only one thread let you choose the interleaving, instea
 3. Run the conflicting request (thread B) in the foreground. It completes while A waits.
 4. Set `catch caught <Exception>` for the failure you expect, then `j.cont()` to resume A.
 5. `j.wait_hit()` and `j.where(5)` show the stack at the throw. All threads are suspended now.
-6. `ignore caught <Exception>`, `j.cmd("resume")`, then read A's response from `res`.
+6. `ignore caught <Exception>`, `j.cmd("resume")`, then read A's response with `a.result()`.
 
 ```python
 j.cmd("stop thread in com.example.Registry.visit")
-bg("a", lambda: get("/iterate"))
+a = bg(get, "/iterate")
 j.collect(["e.getKey()"], count=20, keep=lambda v: v[0] == '"k5"')
 j.cmd("clear com.example.Registry.visit")
 print(get("/remove?key=k8"))
@@ -198,7 +201,7 @@ j.cont()
 print(j.wait_hit()); print(j.where(5))
 j.cmd("ignore caught java.util.ConcurrentModificationException")
 j.cmd("resume")
-print(res["a"])
+print(a.result(timeout=10))
 ```
 
 ## Recovery

@@ -48,7 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  *   get("/reset")
  *   j.cmd("stop thread in DebugTarget.visit")       # thread A stops inside the loop
- *   bg("iterate", lambda: get("/iterate"))
+ *   a = bg(get, "/iterate")
  *   j.collect(["e.getKey()"], count=20, keep=lambda v: v[0] == '"k5"')
  *   j.cmd("clear DebugTarget.visit")
  *   print(get("/remove?key=k8"))                     # thread B changes the map while A waits
@@ -57,7 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   print(j.wait_hit()); print(j.where(5))           # stack at the throw, all threads suspended
  *   j.cmd("ignore caught java.util.ConcurrentModificationException")
  *   j.cmd("resume")
- *   print(res["iterate"])                            # (500, 'java.util.ConcurrentModificationException')
+ *   print(a.result(timeout=10))                      # (500, 'java.util.ConcurrentModificationException')
  *
  * Expected results with the metrics tools (verified on JDK 25, recording with settings=profile):
  *

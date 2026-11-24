@@ -75,7 +75,8 @@
     pathMatch(path, "$HOME/.local/lib/**") ||
     pathMatch(path, "$HOME/.local/share/**") ||
     pathMatch(path, "$HOME/.local/state/**") ||
-    pathMatch(path, "$HOME/.krew/**")
+    pathMatch(path, "$HOME/.krew/**") ||
+    pathMatch(path, "$HOME/.java/.userPrefs/**")
 
 - name: read-tool-settings
   action: read

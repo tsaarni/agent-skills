@@ -1,13 +1,16 @@
 """Drive an interactive jdb session from Python (meant to be loaded into a pysess session).
 
-    exec(open("<skill>/scripts/jdb_driver.py").read())
+    pysess new -n jdb <skill>/scripts/jdb_driver.py
+    pysess exec jdb <<'EOF'
     j = Jdb("localhost:5005")
     j.cmd("stop thread in org.example.Foo.bar")
-    ... trigger the code path from another thread ...
+    r = bg(send_request)   # trigger the code path from another thread
     j.wait_hit()           # waits for the event, selects the stopped thread
     j.p("this.field")      # value of one expression
     j.cont()               # resume the stopped thread
+    r.result(timeout=10)   # the request's result (re-raises its exception)
     j.cleanup()            # clear breakpoints, resume, detach
+    EOF
 
 jdb has no machine-readable protocol. This wrapper reads its output in a background
 thread and waits for a jdb prompt ("> " or "thread-name[N] ") after each command, so
@@ -19,6 +22,8 @@ import re
 import subprocess
 import threading
 import time
+
+from pysess import bg  # noqa: F401  (run a request in a daemon thread, get a Future)
 
 PROMPT = re.compile(r"(^|\n)(> |\S+\[\d+\] )$")
 # Events that jdb prints asynchronously. The prompt can be printed in the middle
@@ -85,10 +90,21 @@ class Jdb:
         return line.split(" = ", 1)[1] if " = " in line else line
 
     def release_others(self):
-        """Resume every thread except the current one."""
-        for tid, _ in self.threads().values():
-            if not self.thread or tid != self.thread[0]:
-                self.cmd("resume " + tid)
+        """Resume every thread except the current one.
+
+        After a method invoke the JDWP agent has done a suspend-all: every thread has
+        suspend count 1, and threads that start later are suspended at start (for
+        example a new pool worker for the next request). Resuming threads one by one
+        does not clear that state; only a VM-level resume does. So suspend the
+        current thread once more, resume the VM, and select the thread again (jdb's
+        `resume` forgets the current thread). Without an invoke the same steps leave
+        the current thread suspended once and the others as they were.
+        """
+        if self.thread:
+            self.cmd("suspend " + self.thread[0])
+        self.cmd("resume")
+        if self.thread:
+            self.cmd("thread " + self.thread[0])
 
     def field_ref(self, obj, field):
         """Return 'instance of X(id=N)' for obj.field via `dump`, without running code in the target."""
