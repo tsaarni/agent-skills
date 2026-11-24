@@ -1,20 +1,7 @@
-"""Drive an interactive jdb session from Python (meant to be loaded into a pysess session).
+"""Drive jdb from a pysess session. Usage: see the java-debugging SKILL.md.
 
-    pysess new -n jdb <skill>/scripts/jdb_driver.py
-    pysess exec jdb <<'EOF'
-    j = Jdb("localhost:5005")
-    j.cmd("stop thread in org.example.Foo.bar")
-    r = bg(send_request)   # trigger the code path from another thread
-    j.wait_hit()           # waits for the event, selects the stopped thread
-    j.p("this.field")      # value of one expression
-    j.cont()               # resume the stopped thread
-    r.result(timeout=10)   # the request's result (re-raises its exception)
-    j.cleanup()            # clear breakpoints, resume, detach
-    EOF
-
-jdb has no machine-readable protocol. This wrapper reads its output in a background
-thread and waits for a jdb prompt ("> " or "thread-name[N] ") after each command, so
-commands and output stay in sync.
+jdb has no machine-readable protocol: a reader thread buffers its output, and each
+command waits for the jdb prompt ("> " or "thread-name[N] ").
 """
 
 import os
@@ -22,8 +9,6 @@ import re
 import subprocess
 import threading
 import time
-
-from pysess import bg  # noqa: F401  (run a request in a daemon thread, get a Future)
 
 PROMPT = re.compile(r"(^|\n)(> |\S+\[\d+\] )$")
 # Events that jdb prints asynchronously. The prompt can be printed in the middle
@@ -75,13 +60,10 @@ class Jdb:
         return self.out(**kw)
 
     def p(self, expr):
-        """Evaluate `print <expr>` and return only the value (or the jdb error text).
+        """`print <expr>`, return only the value (or the jdb error text).
 
-        If the expression invokes a method (also `print obj`, which calls toString()),
-        jdb leaves ALL threads suspended afterwards, even after a `stop thread`
-        breakpoint. With release_after_invoke (default), every other thread is resumed
-        again, so the target keeps serving. Set j.release_after_invoke = False when
-        you stopped with a suspend-all breakpoint and want everything to stay stopped.
+        A method call in expr leaves the whole VM suspended; release_others() undoes
+        that. Set release_after_invoke = False to keep a suspend-all stop in place.
         """
         o = self.cmd("print " + expr).strip()
         if self.thread and self.release_after_invoke:
@@ -92,13 +74,9 @@ class Jdb:
     def release_others(self):
         """Resume every thread except the current one.
 
-        After a method invoke the JDWP agent has done a suspend-all: every thread has
-        suspend count 1, and threads that start later are suspended at start (for
-        example a new pool worker for the next request). Resuming threads one by one
-        does not clear that state; only a VM-level resume does. So suspend the
-        current thread once more, resume the VM, and select the thread again (jdb's
-        `resume` forgets the current thread). Without an invoke the same steps leave
-        the current thread suspended once and the others as they were.
+        A method invoke leaves a VM-level suspend that also suspends threads started
+        later; resuming threads one by one does not clear it. So suspend the current
+        thread once more, resume the VM, and reselect the thread (`resume` forgets it).
         """
         if self.thread:
             self.cmd("suspend " + self.thread[0])
@@ -129,13 +107,10 @@ class Jdb:
         return tid
 
     def wait_hit(self, timeout=30):
-        """Wait for the next breakpoint, watchpoint, exception or step event; select its thread.
+        """Wait for the next event, select its thread (stored in self.thread), return the event line.
 
-        Returns the event line. Events are found in all jdb output, also output
-        already returned by cmd(), so an event printed during `cont` is not lost.
-        `stop thread in` does not make the stopped thread current, so the thread is
-        selected by the name in the event line and stored in self.thread (`threads`
-        stops showing "at breakpoint" once the breakpoint is cleared).
+        Scans all output, also what cmd() already returned, so an event printed
+        during `cont` is not lost.
         """
         end = time.time() + timeout
         while True:
@@ -162,11 +137,7 @@ class Jdb:
             self._evpos = self._pos = len(self._buf)
 
     def cont(self):
-        """Resume the thread stopped by the last event.
-
-        Plain `cont` answers "Nothing suspended" when only one thread was suspended
-        and it is not the current thread, so resume that thread by id.
-        """
+        """Resume the thread stopped by the last event (by id: plain `cont` can answer "Nothing suspended")."""
         if getattr(self, "thread", None):
             o = self.cmd("resume " + self.thread[0])
             self.thread = None
@@ -177,12 +148,7 @@ class Jdb:
         return "\n".join(self.cmd("where").splitlines()[:depth])
 
     def collect(self, exprs, count=10, timeout=30, keep=None):
-        """Logging or conditional breakpoint, done in the driver (jdb has neither).
-
-        For each event: evaluate `exprs`, resume the thread, repeat `count` times.
-        If `keep(values)` is given and returns True, stop there and leave the thread
-        suspended for inspection. Returns the list of value lists.
-        """
+        """At each of up to `count` events evaluate `exprs` and resume; stop early, suspended, when `keep(values)` is true."""
         rows = []
         for _ in range(count):
             self.wait_hit(timeout)

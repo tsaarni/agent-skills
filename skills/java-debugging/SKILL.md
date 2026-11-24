@@ -45,12 +45,11 @@ Check that the port is open with `ss -ltnp | grep 5005`.
 jdb is interactive and each bash call is a new process, so run jdb inside a pysess session (see the [pysess skill](../pysess/SKILL.md)).
 Start the session with the helper [scripts/jdb_driver.py](./scripts/jdb_driver.py) loaded, then attach.
 The helper waits for the jdb prompt after each command, so commands and output stay in sync.
-It imports `pysess.bg`; if loading fails with `ImportError: cannot import name 'bg'`, upgrade pysess (`uv tool upgrade pysess`).
 
 ```bash
 pysess new -n jdb <skill-dir>/scripts/jdb_driver.py
 pysess exec jdb -t 30 <<'EOF'
-import urllib.request, urllib.error
+import pysess, urllib.request, urllib.error
 j = Jdb("localhost:5005")
 def get(path):
     try:
@@ -75,15 +74,14 @@ EOF
 | `j.where(depth)` | Top of the stack of the current thread. |
 | `j.drain()` | Forget events printed so far. |
 | `j.cleanup()` | Clear breakpoints, resume all threads, detach. |
-| `bg(fn, *args)` | `pysess.bg`, imported by the driver: run `fn` in a daemon thread, return a `Future` (`done()`, `result(timeout)`). |
 
 A breakpoint blocks the request that hits it, and a pysess session runs one step at a time.
-Send the request with `bg`, then call `wait_hit()`; read the response later with `.result()`.
+Send the request with `pysess.bg` (see the pysess skill), then call `wait_hit()`; read the response later with `.result(timeout)`.
 Give the client a timeout longer than you will spend inspecting: if it times out, the server finishes the request after resume, but the response is lost.
 
 ```python
 j.cmd("stop thread in com.example.OrderService.place")
-order = bg(get, "/orders/1")
+order = pysess.bg(get, "/orders/1")
 print(j.wait_hit())
 print(j.where(4))
 print(j.cmd("locals"))
@@ -173,7 +171,7 @@ Do not use `hashCode()` of collections: it is computed from the content.
 
 1. Read the source and choose methods to stop in. Instance methods of the class that holds the state let you use `this.<field>`.
 2. Bring the target into a known state (for example, invalidate a cache).
-3. Set `stop thread in` at the first method, trigger the request with `bg`, call `wait_hit()`.
+3. Set `stop thread in` at the first method, trigger the request with `pysess.bg`, call `wait_hit()`.
 4. Record the object ids (`dump`, `locals`).
 5. `clear` that breakpoint, set the next, `j.cont()`, `wait_hit()`, compare ids.
 6. For a method that runs many times, use `j.collect(["this.id"], count=50, keep=lambda v: v[0] == '"x"')`.
@@ -184,7 +182,7 @@ Do not use `hashCode()` of collections: it is computed from the content.
 Breakpoints that suspend only one thread let you choose the interleaving, instead of running many requests and hoping for a failure.
 
 1. Set `stop thread in` at a method that runs while thread A holds the shared state (for example inside an iteration loop).
-2. Trigger A with `bg`. Use `j.collect(...)` to let it run until it reaches the point you want, then `clear` the breakpoint. A stays suspended.
+2. Trigger A with `pysess.bg`. Use `j.collect(...)` to let it run until it reaches the point you want, then `clear` the breakpoint. A stays suspended.
 3. Run the conflicting request (thread B) in the foreground. It completes while A waits.
 4. Set `catch caught <Exception>` for the failure you expect, then `j.cont()` to resume A.
 5. `j.wait_hit()` and `j.where(5)` show the stack at the throw. All threads are suspended now.
@@ -192,7 +190,7 @@ Breakpoints that suspend only one thread let you choose the interleaving, instea
 
 ```python
 j.cmd("stop thread in com.example.Registry.visit")
-a = bg(get, "/iterate")
+a = pysess.bg(get, "/iterate")
 j.collect(["e.getKey()"], count=20, keep=lambda v: v[0] == '"k5"')
 j.cmd("clear com.example.Registry.visit")
 print(get("/remove?key=k8"))

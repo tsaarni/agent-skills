@@ -48,7 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  *   get("/reset")
  *   j.cmd("stop thread in DebugTarget.visit")       # thread A stops inside the loop
- *   a = bg(get, "/iterate")
+ *   a = pysess.bg(get, "/iterate")
  *   j.collect(["e.getKey()"], count=20, keep=lambda v: v[0] == '"k5"')
  *   j.cmd("clear DebugTarget.visit")
  *   print(get("/remove?key=k8"))                     # thread B changes the map while A waits
