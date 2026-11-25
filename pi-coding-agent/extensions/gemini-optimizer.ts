@@ -1,125 +1,155 @@
 /**
  * gemini-optimizer.ts
  *
- * Pi extension that optimizes the agent for Google Gemini models:
+ * Pi extension that optimizes the agent for Google Gemini (`provider: "google"`):
  *
- *   1. Bash tool replacement & truncation — replaces Pi's built-in bash tool
- *      with a memory-bounded streaming executor. When Gemini is active, output is
- *      capped at 8 KB (20% head / 80% tail) and streamed directly to a unique file
- *      in the OS temp directory (os.tmpdir()/pi-bash-<id>.log). Memory usage is strictly
- *      bounded to ~15 KB regardless of how large the command output is.
+ *   1. TPM pacer — tracks a per-model sliding 60-second token window (fresh input +
+ *      cached input) and sleeps in `before_provider_request` when the rolling total
+ *      would exceed `safetyMargin` (default 90%) of the model's TPM limit, showing
+ *      a live 1-second countdown in the Pi footer.
  *
- *   2. TPM pacer — tracks a sliding 60-second token window (fresh input + cached input)
- *      and sleeps before turns when the rolling total would exceed 90% of Gemini's
- *      2 M TPM quota, rendering an active 1-second countdown in the Pi footer.
+ *   2. 429 retry fix & auto-calibration — wraps the built-in `google` provider's
+ *      `streamSimple` via `pi.registerProvider()` to inject a scoped `options.fetch`
+ *      (no global fetch monkey-patching). Parses `google.rpc.RetryInfo.retryDelay`,
+ *      waits the server-requested duration with a live footer countdown, retries up
+ *      to `maxRetries` times using the request's `AbortSignal`, and auto-calibrates
+ *      the active model's TPM limit from `google.rpc.QuotaFailure.violations[].quotaValue`.
  *
- *   3. 429 retry fix — intercepts fetch for Gemini endpoints, parses the structured
- *      google.rpc.RetryInfo backoff, and waits the server-requested duration before
- *      retrying with a fresh request signal to bypass client timeout burnout.
+ * Activation:
+ *   Auto-loaded by Pi at startup, but only active when the selected model uses
+ *   `provider: "google"` (e.g. `google/gemini-*`). Complete no-op for other
+ *   providers (including Gemini via `openrouter` or `google-vertex`). Switching
+ *   models mid-session enables/disables both features dynamically.
  *
- * All features dynamically gate on `ctx.model?.provider === "google"`.
+ * Typical Google 429 Errors & How to Observe Them:
+ *   Google's Paid Tier / AI Pro limits are dynamic per project and model. Check your
+ *   live limits in Google AI Studio -> Dashboard -> Rate Limits.
+ *
+ *   1) Per-minute TPM exhaustion (retryable — triggers retry + auto-calibration):
+ *      HTTP 429 RESOURCE_EXHAUSTED
+ *      {
+ *        "error": {
+ *          "code": 429,
+ *          "status": "RESOURCE_EXHAUSTED",
+ *          "message": "You exceeded your current quota... Quota exceeded for metric:
+ *            generativelanguage.googleapis.com/generate_content_paid_tier_input_token_count,
+ *            limit: 2000000, model: gemini-4-argon\nPlease retry in 58.4s.",
+ *          "details": [
+ *            {
+ *              "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+ *              "violations": [{
+ *                "quotaMetric": "generativelanguage.googleapis.com/generate_content_paid_tier_input_token_count",
+ *                "quotaId": "GenerateContentPaidTierInputTokensPerModelPerMinute",
+ *                "quotaValue": "2000000"
+ *              }]
+ *            },
+ *            { "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "58s" }
+ *          ]
+ *        }
+ *      }
+ *      Note: Google discounts cached input tokens 90% for billing, but 0% for TPM.
+ *      Pi's built-in retry skips this because `google-shared.js` drops headers and
+ *      `retry.js` treats "quota exceeded" as non-retryable.
+ *
+ *   2) Per-minute RPM exhaustion (retryable — waits `retryDelay` and retries):
+ *      `quotaId` contains `RequestsPerMinute` / `PerMinute`.
+ *
+ *   3) Daily quota / hard spend cap (NOT retryable — fails fast without sleeping):
+ *      `quotaId` contains `PerDay` (e.g. `GenerateRequestsPerDayPerProjectPerModel-FreeTier`).
+ *
+ *   Observing in Pi:
+ *   - Footer shows `⏳ Pacing Gemini (Xs ...)` during proactive TPM pacing.
+ *   - Footer shows `⏳ Gemini 429 — waiting Xs ... (attempt/max)` during 429 backoff.
+ *   - Toast notification reports when `QuotaFailure.quotaValue` auto-calibrates a model's TPM limit.
  *
  * Configuration (~/.pi/agent/settings.json under "geminiOptimizer"):
  *
  *   "geminiOptimizer": {
- *     "truncation": {
- *       "enabled": true,
- *       "maxChars": 8000,
- *       "headRatio": 0.2
- *     },
  *     "pacer": {
  *       "enabled": true,
  *       "tpmLimit": 2000000,
+ *       "tpmLimits": {
+ *         "gemini-4-argon": 2000000,
+ *         "gemini-4-neon": 2000000
+ *       },
  *       "safetyMargin": 0.9,
  *       "windowSeconds": 60
  *     },
  *     "retryFix": {
  *       "enabled": true,
+ *       "maxRetries": 3,
  *       "defaultRetryDelayMs": 60000
  *     }
  *   }
  */
 
-import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import {
-  createBashToolDefinition,
-  createLocalBashOperations,
   getAgentDir,
+  type BeforeProviderRequestEvent,
   type ExtensionAPI,
   type ExtensionContext,
   type MessageEndEvent,
   type ModelSelectEvent,
+  type SessionStartEvent,
   type TurnEndEvent,
-  type TurnStartEvent,
 } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
 // Configuration types & defaults
 // ---------------------------------------------------------------------------
 
-interface TruncationConfig {
-  enabled: boolean;
-  maxChars: number;
-  headRatio: number;
-}
-
 interface PacerConfig {
   enabled: boolean;
   tpmLimit: number;
+  tpmLimits: Record<string, number>;
   safetyMargin: number;
   windowSeconds: number;
 }
 
 interface RetryFixConfig {
   enabled: boolean;
+  maxRetries: number;
   defaultRetryDelayMs: number;
 }
 
 interface OptimizerConfig {
-  truncation: TruncationConfig;
   pacer: PacerConfig;
   retryFix: RetryFixConfig;
 }
 
 const DEFAULTS: OptimizerConfig = {
-  truncation: {
-    enabled: true,
-    maxChars: 8000,
-    headRatio: 0.2,
-  },
   pacer: {
     enabled: true,
     tpmLimit: 2_000_000,
+    tpmLimits: {},
     safetyMargin: 0.9,
     windowSeconds: 60,
   },
   retryFix: {
     enabled: true,
+    maxRetries: 3,
     defaultRetryDelayMs: 60_000,
   },
 };
 
 async function loadConfig(): Promise<OptimizerConfig> {
   try {
-    const settingsPath = join(getAgentDir(), "settings.json");
-    const raw = await readFile(settingsPath, "utf8");
-    const settings = JSON.parse(raw);
-    const userCfg = settings?.geminiOptimizer;
+    const raw = await readFile(join(getAgentDir(), "settings.json"), "utf8");
+    const userCfg = JSON.parse(raw)?.geminiOptimizer;
     if (!userCfg || typeof userCfg !== "object") {
       return DEFAULTS;
     }
+    const userPacer = typeof userCfg.pacer === "object" && userCfg.pacer ? userCfg.pacer : {};
+    const userTpmLimits =
+      typeof userPacer.tpmLimits === "object" && userPacer.tpmLimits ? userPacer.tpmLimits : {};
     return {
-      truncation: {
-        ...DEFAULTS.truncation,
-        ...(typeof userCfg.truncation === "object" ? userCfg.truncation : {}),
-      },
       pacer: {
         ...DEFAULTS.pacer,
-        ...(typeof userCfg.pacer === "object" ? userCfg.pacer : {}),
+        ...userPacer,
+        tpmLimits: { ...DEFAULTS.pacer.tpmLimits, ...userTpmLimits },
       },
       retryFix: {
         ...DEFAULTS.retryFix,
@@ -135,406 +165,172 @@ async function loadConfig(): Promise<OptimizerConfig> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function isGoogleActive(ctx?: ExtensionContext): boolean {
+  return ctx?.model?.provider === "google";
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Aborted", "AbortError"));
       return;
     }
-    const timer = setTimeout(resolve, Math.max(0, ms));
     const onAbort = () => {
       clearTimeout(timer);
       reject(new DOMException("Aborted", "AbortError"));
     };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, Math.max(0, ms));
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
-function isGoogleActive(ctx?: ExtensionContext): boolean {
-  return ctx?.model?.provider === "google";
-}
-
-// ---------------------------------------------------------------------------
-// Feature 1: Memory-bounded Head/Tail Bash Accumulator & Tool Replacement
-// ---------------------------------------------------------------------------
-
-const BASH_UPDATE_THROTTLE_MS = 100;
-
-class BoundedHeadTailAccumulator {
-  private readonly maxChars: number;
-  private readonly headMaxChars: number;
-  private readonly tailMaxChars: number;
-  private readonly tailRollingLimit: number;
-  private readonly decoder = new TextDecoder();
-
-  private headText = "";
-  private tailText = "";
-  private totalChars = 0;
-  private totalBytes = 0;
-  private finished = false;
-
-  private tempFilePath?: string;
-  private tempFileStream?: WriteStream;
-  private rawChunks: Buffer[] = [];
-
-  constructor(maxChars: number, headRatio: number = 0.2) {
-    this.maxChars = maxChars;
-    this.headMaxChars = Math.max(1, Math.floor(maxChars * headRatio));
-    this.tailMaxChars = Math.max(1, maxChars - this.headMaxChars);
-    this.tailRollingLimit = this.tailMaxChars * 2;
-  }
-
-  append(data: Buffer): void {
-    if (this.finished) {
-      throw new Error("Cannot append to a finished output accumulator");
-    }
-    this.totalBytes += data.length;
-
-    const text = this.decoder.decode(data, { stream: true });
-    if (text.length > 0) {
-      this.appendDecodedText(text);
-    }
-
-    if (this.tempFileStream || this.shouldUseTempFile()) {
-      this.ensureTempFile();
-      this.tempFileStream?.write(data);
-    } else if (data.length > 0) {
-      this.rawChunks.push(data);
-    }
-  }
-
-  private appendDecodedText(text: string): void {
-    this.totalChars += text.length;
-
-    // Capture head up to headMaxChars once
-    if (this.headText.length < this.headMaxChars) {
-      const needed = this.headMaxChars - this.headText.length;
-      this.headText += text.slice(0, needed);
-    }
-
-    // Capture rolling tail
-    this.tailText += text;
-    if (this.tailText.length > this.tailRollingLimit) {
-      this.tailText = this.tailText.slice(-this.tailMaxChars);
-    }
-  }
-
-  finish(): void {
-    if (this.finished) return;
-    this.finished = true;
-
-    const remaining = this.decoder.decode();
-    if (remaining.length > 0) {
-      this.appendDecodedText(remaining);
-    }
-
-    if (this.shouldUseTempFile()) {
-      this.ensureTempFile();
-    }
-  }
-
-  private shouldUseTempFile(): boolean {
-    return this.totalChars > this.maxChars;
-  }
-
-  private ensureTempFile(): void {
-    if (this.tempFilePath) return;
-    const id = randomBytes(8).toString("hex");
-    this.tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-    this.tempFileStream = createWriteStream(this.tempFilePath);
-    for (const chunk of this.rawChunks) {
-      this.tempFileStream.write(chunk);
-    }
-    this.rawChunks = [];
-  }
-
-  async closeTempFile(): Promise<void> {
-    if (!this.tempFileStream) return;
-    const stream = this.tempFileStream;
-    this.tempFileStream = undefined;
-    await new Promise<void>((resolve, reject) => {
-      stream.once("error", reject);
-      stream.once("finish", resolve);
-      stream.end();
-    });
-  }
-
-  getSnapshot(): { content: string; fullOutputPath?: string; truncated: boolean } {
-    if (this.totalChars <= this.maxChars) {
-      return {
-        content: this.tailText,
-        truncated: false,
-      };
-    }
-
-    let tailSlice = this.tailText.slice(-this.tailMaxChars);
-    const firstNewline = tailSlice.indexOf("\n");
-    if (firstNewline !== -1 && firstNewline < 200) {
-      tailSlice = tailSlice.slice(firstNewline + 1);
-    }
-
-    const omitted = this.totalChars - (this.headText.length + tailSlice.length);
-    const content = `${this.headText}\n\n[... ${omitted.toLocaleString()} chars omitted. Full output: ${this.tempFilePath} ...]\n\n${tailSlice}`;
-
-    return {
-      content,
-      fullOutputPath: this.tempFilePath,
-      truncated: true,
-    };
-  }
-}
-
-function getBashEnv(ctx?: ExtensionContext): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.PI_SESSION_ID;
-  delete env.PI_SESSION_FILE;
-  delete env.PI_PROVIDER;
-  delete env.PI_MODEL;
-  delete env.PI_REASONING_LEVEL;
-
-  if (ctx) {
-    if (ctx.sessionManager) {
-      env.PI_SESSION_ID = ctx.sessionManager.getSessionId();
-      const sessionFile = ctx.sessionManager.getSessionFile?.();
-      if (sessionFile) env.PI_SESSION_FILE = sessionFile;
-    }
-    if (ctx.model) {
-      env.PI_PROVIDER = ctx.model.provider;
-      env.PI_MODEL = ctx.model.id;
-    }
-    if (ctx.thinkingLevel) {
-      env.PI_REASONING_LEVEL = ctx.thinkingLevel;
-    }
-  }
-  return env;
-}
-
-function registerOptimizedBashTool(pi: ExtensionAPI, cfg: TruncationConfig): void {
-  const baseDef = createBashToolDefinition(process.cwd());
-  const ops = createLocalBashOperations();
-
-  pi.registerTool({
-    ...baseDef,
-    name: "bash",
-    async execute(toolCallId, params: { command: string; timeout?: number }, signal, onUpdate, ctx) {
-      const command = params.command;
-      const timeout = params.timeout;
-      const effectiveCwd = ctx?.cwd || process.cwd();
-
-      // If the active model is not Google Gemini, delegate directly to Pi's built-in bash tool
-      if (!isGoogleActive(ctx)) {
-        return baseDef.execute(toolCallId, params, signal, onUpdate, ctx);
+async function sleepWithCountdown(
+  waitMs: number,
+  statusKey: string,
+  formatStatus: (remainingSec: number) => string,
+  ctx?: ExtensionContext,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const endTime = Date.now() + waitMs;
+  try {
+    while (Date.now() < endTime) {
+      if (signal?.aborted) return false;
+      const remainingMs = endTime - Date.now();
+      if (remainingMs >= 300) {
+        ctx?.ui.setStatus(statusKey, formatStatus(Math.max(1, Math.ceil(remainingMs / 1000))));
       }
-
-      const accumulator = new BoundedHeadTailAccumulator(cfg.maxChars, cfg.headRatio);
-      let acceptingOutput = true;
-      let updateTimer: NodeJS.Timeout | undefined;
-      let updateDirty = false;
-      let lastUpdateAt = 0;
-
-      const emitOutputUpdate = () => {
-        if (!onUpdate || !updateDirty) return;
-        updateDirty = false;
-        lastUpdateAt = Date.now();
-        const snap = accumulator.getSnapshot();
-        onUpdate({
-          content: [{ type: "text", text: snap.content }],
-          details: snap.fullOutputPath ? { fullOutputPath: snap.fullOutputPath } : undefined,
-        });
-      };
-
-      const clearUpdateTimer = () => {
-        if (updateTimer) {
-          clearTimeout(updateTimer);
-          updateTimer = undefined;
-        }
-      };
-
-      const scheduleOutputUpdate = () => {
-        if (!onUpdate) return;
-        updateDirty = true;
-        const delay = BASH_UPDATE_THROTTLE_MS - (Date.now() - lastUpdateAt);
-        if (delay <= 0) {
-          clearUpdateTimer();
-          emitOutputUpdate();
-          return;
-        }
-        updateTimer ??= setTimeout(() => {
-          updateTimer = undefined;
-          emitOutputUpdate();
-        }, delay);
-      };
-
-      if (onUpdate) {
-        onUpdate({ content: [], details: undefined });
-      }
-
-      const handleData = (data: Buffer) => {
-        if (!acceptingOutput) return;
-        accumulator.append(data);
-        scheduleOutputUpdate();
-      };
-
-      const finishOutput = async () => {
-        acceptingOutput = false;
-        accumulator.finish();
-        clearUpdateTimer();
-        emitOutputUpdate();
-        const snap = accumulator.getSnapshot();
-        await accumulator.closeTempFile();
-        return snap;
-      };
-
-      const appendStatus = (text: string, status: string) =>
-        `${text ? `${text}\n\n` : ""}${status}`;
-
-      try {
-        let exitCode: number | null = null;
-        try {
-          const result = await ops.exec(command, effectiveCwd, {
-            onData: handleData,
-            signal,
-            timeout,
-            env: getBashEnv(ctx),
-          });
-          exitCode = result.exitCode;
-        } catch (err) {
-          const snap = await finishOutput();
-          const text = snap.content;
-          if (err instanceof Error && err.message === "aborted") {
-            throw new Error(appendStatus(text, "Command aborted"));
-          }
-          if (err instanceof Error && err.message.startsWith("timeout:")) {
-            const timeoutSecs = err.message.split(":")[1];
-            throw new Error(appendStatus(text, `Command timed out after ${timeoutSecs} seconds`));
-          }
-          throw err;
-        }
-
-        const snap = await finishOutput();
-        const outputText = snap.content || "(no output)";
-        if (exitCode !== 0 && exitCode !== null) {
-          throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
-        }
-
-        return {
-          content: [{ type: "text", text: outputText }],
-          details: snap.fullOutputPath ? { fullOutputPath: snap.fullOutputPath } : {},
-        };
-      } finally {
-        clearUpdateTimer();
-      }
-    },
-  });
+      await sleep(Math.min(1000, remainingMs), signal);
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    ctx?.ui.setStatus(statusKey, undefined);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Feature 3: 429 fetch interceptor
+// 429 parsing & scoped fetch wrapper
 // ---------------------------------------------------------------------------
 
-const GEMINI_HOST = "generativelanguage.googleapis.com";
-const FETCH_PATCHED = Symbol.for("pi.gemini-optimizer.fetch-patched");
+interface Parsed429 {
+  delayMs: number;
+  learnedTpmLimit?: number;
+  isDailyQuota: boolean;
+}
 
-function installFetchInterceptor(
+interface GoogleErrorBody {
+  error?: {
+    message?: string;
+    details?: Array<{
+      "@type"?: string;
+      retryDelay?: string;
+      violations?: Array<{
+        quotaMetric?: string;
+        quotaId?: string;
+        quotaValue?: string;
+      }>;
+    }>;
+  };
+}
+
+async function parseGoogle429(response: Response, fallbackMs: number): Promise<Parsed429> {
+  let delayMs = fallbackMs;
+  let learnedTpmLimit: number | undefined;
+  let isDailyQuota = false;
+
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter) {
+    const secs = Number.parseFloat(retryAfter);
+    if (Number.isFinite(secs) && secs > 0) delayMs = secs * 1000;
+  }
+
+  try {
+    const body = (await response.clone().json()) as GoogleErrorBody;
+    const details = body?.error?.details ?? [];
+
+    const retryInfo = details.find(
+      (d) => d["@type"] === "type.googleapis.com/google.rpc.RetryInfo",
+    );
+    if (retryInfo?.retryDelay) {
+      const match = retryInfo.retryDelay.match(/^([0-9.]+)s$/);
+      if (match) delayMs = Number.parseFloat(match[1]) * 1000;
+    } else if (body?.error?.message) {
+      const match = body.error.message.match(/retry in ([0-9.]+)s/i);
+      if (match) delayMs = Number.parseFloat(match[1]) * 1000;
+    }
+
+    const quotaFailure = details.find(
+      (d) => d["@type"] === "type.googleapis.com/google.rpc.QuotaFailure",
+    );
+    for (const v of quotaFailure?.violations ?? []) {
+      const id = v.quotaId ?? "";
+      const metric = v.quotaMetric ?? "";
+      if (/PerDay/i.test(id)) {
+        isDailyQuota = true;
+      }
+      if (/InputTokens.*PerMinute/i.test(id) || /input_token_count/i.test(metric)) {
+        const parsed = Number.parseInt(v.quotaValue ?? "", 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          learnedTpmLimit = parsed;
+        }
+      }
+    }
+  } catch {
+    // Non-JSON or unreadable body; use header or fallback
+  }
+
+  return { delayMs, learnedTpmLimit, isDailyQuota };
+}
+
+function createGeminiRetryFetch(
+  baseFetch: typeof globalThis.fetch,
+  modelId: string,
   cfg: RetryFixConfig,
+  requestSignal: AbortSignal | undefined,
   getCtx: () => ExtensionContext | undefined,
-): () => void {
-  if ((globalThis as Record<symbol, unknown>)[FETCH_PATCHED]) {
-    return () => {};
-  }
-
-  const originalFetch = globalThis.fetch;
-  (globalThis as Record<symbol, unknown>)[FETCH_PATCHED] = true;
-
-  globalThis.fetch = async function patchedFetch(
+  onLearnTpmLimit: (modelId: string, limit: number) => void,
+): typeof globalThis.fetch {
+  return async function geminiRetryFetch(
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    const isGeminiEndpoint = url.includes(GEMINI_HOST);
-    const ctx = getCtx();
+    let currentInit = init;
 
-    if (!isGeminiEndpoint || !isGoogleActive(ctx)) {
-      return originalFetch(input, init);
-    }
-
-    const response = await originalFetch(input, init);
-    if (response.status !== 429) {
-      return response;
-    }
-
-    // Parse retry delay from RetryInfo, error message, or Retry-After header
-    let delayMs = cfg.defaultRetryDelayMs;
-
-    const retryAfterHeader = response.headers.get("retry-after");
-    if (retryAfterHeader) {
-      const secs = parseFloat(retryAfterHeader);
-      if (!Number.isNaN(secs) && secs > 0) delayMs = secs * 1000;
-    }
-
-    try {
-      const cloned = response.clone();
-      const body = (await cloned.json()) as {
-        error?: {
-          message?: string;
-          details?: Array<{
-            "@type"?: string;
-            retryDelay?: string;
-          }>;
-        };
-      };
-
-      const retryInfo = body?.error?.details?.find(
-        (d) => d["@type"] === "type.googleapis.com/google.rpc.RetryInfo",
-      );
-
-      if (retryInfo?.retryDelay) {
-        const match = retryInfo.retryDelay.match(/^([0-9.]+)s$/);
-        if (match) delayMs = parseFloat(match[1]) * 1000;
-      } else if (body?.error?.message) {
-        const match = body.error.message.match(/retry in ([0-9.]+)s/i);
-        if (match) delayMs = parseFloat(match[1]) * 1000;
-      }
-    } catch {
-      // Body was not JSON or unreadable
-    }
-
-    // Active live countdown in footer
-    const endTime = Date.now() + delayMs;
-    while (Date.now() < endTime) {
-      if (ctx?.signal?.aborted) {
-        ctx?.ui.setStatus("gemini-retry", undefined);
+    for (let attempt = 0; ; attempt++) {
+      const response = await baseFetch(input, currentInit);
+      if (response.status !== 429 || attempt >= cfg.maxRetries) {
         return response;
       }
-      const remainingSec = Math.max(1, Math.ceil((endTime - Date.now()) / 1000));
-      ctx?.ui.setStatus(
+
+      const parsed = await parseGoogle429(response, cfg.defaultRetryDelayMs);
+      if (parsed.learnedTpmLimit !== undefined) {
+        onLearnTpmLimit(modelId, parsed.learnedTpmLimit);
+      }
+      if (parsed.isDailyQuota) {
+        return response;
+      }
+
+      const signal = requestSignal ?? currentInit?.signal ?? undefined;
+      const completed = await sleepWithCountdown(
+        parsed.delayMs,
         "gemini-retry",
-        `⏳ Gemini 429 — waiting ${remainingSec}s as requested by server...`,
+        (secs) =>
+          `⏳ Gemini 429 — waiting ${secs}s as requested by server (${attempt + 1}/${cfg.maxRetries})...`,
+        getCtx(),
+        signal,
       );
-      const chunk = Math.min(1000, endTime - Date.now());
-      try {
-        await sleep(chunk, ctx?.signal);
-      } catch {
-        ctx?.ui.setStatus("gemini-retry", undefined);
+      if (!completed) {
         return response;
       }
+
+      // Use requestSignal on retry in case the SDK's per-attempt timeout signal expired while waiting
+      currentInit = { ...init, signal: requestSignal };
     }
-
-    ctx?.ui.setStatus("gemini-retry", undefined);
-
-    // Retry with ctx?.signal (replacing internal SDK timeout controller which may have elapsed)
-    const retryInit: RequestInit = {
-      ...init,
-      signal: ctx?.signal,
-    };
-
-    return originalFetch(input, retryInit);
   } as typeof globalThis.fetch;
-
-  return () => {
-    globalThis.fetch = originalFetch;
-    delete (globalThis as Record<symbol, unknown>)[FETCH_PATCHED];
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -548,22 +344,36 @@ interface TokenRecord {
 
 export default async function (pi: ExtensionAPI) {
   const cfg = await loadConfig();
-
-  // Current session/turn context, dynamically populated across events
   let currentCtx: ExtensionContext | undefined;
 
-  // Install fetch interceptor with clean uninstaller
-  const uninstallFetch = cfg.retryFix.enabled
-    ? installFetchInterceptor(cfg.retryFix, () => currentCtx)
-    : () => {};
+  // Per-model TPM limits learned dynamically from Google 429 QuotaFailure responses
+  const learnedTpmLimits = new Map<string, number>();
 
-  // Clean up on session shutdown
+  const getEffectiveTpmLimit = (modelId: string): number =>
+    learnedTpmLimits.get(modelId) ?? cfg.pacer.tpmLimits[modelId] ?? cfg.pacer.tpmLimit;
+
+  const onLearnTpmLimit = (modelId: string, limit: number) => {
+    const prev = getEffectiveTpmLimit(modelId);
+    learnedTpmLimits.set(modelId, limit);
+    if (limit !== prev) {
+      currentCtx?.ui.notify(
+        `Gemini pacer: calibrated ${modelId} TPM limit to ${limit.toLocaleString()} from API 429 ` +
+          `(set geminiOptimizer.pacer.tpmLimits["${modelId}"] in settings.json to persist)`,
+        "info",
+      );
+    }
+  };
+
+  pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
+    currentCtx = ctx;
+  });
+
   pi.on("session_shutdown", () => {
-    uninstallFetch();
+    currentCtx?.ui.setStatus("gemini-pacer", undefined);
+    currentCtx?.ui.setStatus("gemini-retry", undefined);
     currentCtx = undefined;
   });
 
-  // Track context on model changes and clear any stale Google statuses if switching away
   pi.on("model_select", (event: ModelSelectEvent, ctx: ExtensionContext) => {
     currentCtx = ctx;
     if (event.model.provider !== "google") {
@@ -572,62 +382,89 @@ export default async function (pi: ExtensionAPI) {
     }
   });
 
-  // ---------------------------------------------------------------------------
-  // Feature 1: Bash tool replacement & truncation
-  // ---------------------------------------------------------------------------
-  if (cfg.truncation.enabled) {
-    registerOptimizedBashTool(pi, cfg.truncation);
+  // -------------------------------------------------------------------------
+  // 429 retry fix via scoped provider streamSimple wrapper
+  // -------------------------------------------------------------------------
+  if (cfg.retryFix.enabled) {
+    pi.registerProvider("google", {
+      api: "google-generative-ai",
+      streamSimple(model, context, options) {
+        const baseApi = getApiProvider("google-generative-ai");
+        if (!baseApi) {
+          throw new Error('Built-in API "google-generative-ai" is not registered');
+        }
+        return baseApi.streamSimple(model, context, {
+          ...options,
+          fetch: createGeminiRetryFetch(
+            options?.fetch ?? globalThis.fetch,
+            model.id,
+            cfg.retryFix,
+            options?.signal,
+            () => currentCtx,
+            onLearnTpmLimit,
+          ),
+        });
+      },
+    });
   }
 
-  // ---------------------------------------------------------------------------
-  // Feature 2: TPM pacer
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Per-model sliding-window TPM pacer
+  // -------------------------------------------------------------------------
   if (cfg.pacer.enabled) {
-    const tokenQueue: TokenRecord[] = [];
+    const queuesByModel = new Map<string, TokenRecord[]>();
     const windowMs = cfg.pacer.windowSeconds * 1000;
-    const ceiling = cfg.pacer.tpmLimit * cfg.pacer.safetyMargin;
 
-    // Record total input tokens (fresh input + context cache reads) after each assistant response
+    const getQueue = (modelId: string): TokenRecord[] => {
+      let queue = queuesByModel.get(modelId);
+      if (!queue) {
+        queue = [];
+        queuesByModel.set(modelId, queue);
+      }
+      return queue;
+    };
+
+    const pruneExpired = (queue: TokenRecord[], now: number) => {
+      while (queue.length > 0 && now - queue[0].timestamp > windowMs) {
+        queue.shift();
+      }
+    };
+
     pi.on("message_end", (event: MessageEndEvent, ctx: ExtensionContext) => {
       currentCtx = ctx;
       if (!isGoogleActive(ctx) || event.message.role !== "assistant") return;
 
       const usage = event.message.usage;
-      if (!usage) return;
+      const modelId = ctx.model?.id;
+      if (!usage || !modelId) return;
 
-      // Google's 2M TPM quota metric includes both fresh and cached input tokens
+      // Google's TPM quota counts both fresh and cached input tokens
       const tokens = (usage.input ?? 0) + (usage.cacheRead ?? 0);
       if (tokens > 0) {
-        tokenQueue.push({ timestamp: Date.now(), tokens });
+        getQueue(modelId).push({ timestamp: Date.now(), tokens });
       }
     });
 
-    // Before each turn, check rolling TPM against ceiling and pace if necessary
-    pi.on("turn_start", async (_event: TurnStartEvent, ctx: ExtensionContext) => {
+    pi.on("before_provider_request", async (_event: BeforeProviderRequestEvent, ctx: ExtensionContext) => {
       currentCtx = ctx;
-      if (!isGoogleActive(ctx)) return;
+      if (!isGoogleActive(ctx) || !ctx.model) return;
+
+      const modelId = ctx.model.id;
+      const tpmLimit = getEffectiveTpmLimit(modelId);
+      const ceiling = tpmLimit * cfg.pacer.safetyMargin;
+      const queue = getQueue(modelId);
 
       const now = Date.now();
+      pruneExpired(queue, now);
 
-      // Prune records older than the sliding window
-      while (tokenQueue.length > 0 && now - tokenQueue[0].timestamp > windowMs) {
-        tokenQueue.shift();
-      }
-
-      const rollingTokens = tokenQueue.reduce((sum, r) => sum + r.tokens, 0);
+      const rollingTokens = queue.reduce((sum, r) => sum + r.tokens, 0);
       const usageTokens = ctx.getContextUsage()?.tokens;
       const estimated =
-        usageTokens && usageTokens > 0
-          ? usageTokens
-          : (tokenQueue.at(-1)?.tokens ?? 100_000);
+        usageTokens && usageTokens > 0 ? usageTokens : (queue.at(-1)?.tokens ?? 100_000);
 
-      if (rollingTokens + estimated <= ceiling) {
-        return;
-      }
+      if (rollingTokens + estimated <= ceiling) return;
 
-      // Determine recovery target: aim to leave headroom (at least one extra turn's
-      // worth of tokens, up to 25% of ceiling) so we don't immediately stutter again
-      // on the very next turn.
+      // Wait until enough old records expire to leave headroom for at least one extra turn
       const headroom = Math.min(estimated, ceiling * 0.25);
       const targetCeiling = Math.max(estimated, ceiling - headroom);
 
@@ -635,61 +472,36 @@ export default async function (pi: ExtensionAPI) {
       let targetExpiry = now;
       let bestExpiry = now;
 
-      for (const record of tokenQueue) {
+      for (const record of queue) {
         projected -= record.tokens;
-        // First record that gets projected under the ceiling
         if (projected <= ceiling && bestExpiry === now) {
           bestExpiry = record.timestamp + windowMs + 1000;
         }
-        // Record that reaches our target with headroom
         if (projected <= targetCeiling) {
           targetExpiry = record.timestamp + windowMs + 1000;
           break;
         }
       }
 
-      // If targetCeiling couldn't be reached with the records in the queue,
-      // fall back to bestExpiry (or wait for the entire queue to clear)
       if (targetExpiry === now) {
         targetExpiry =
-          bestExpiry !== now
-            ? bestExpiry
-            : (tokenQueue.at(-1)?.timestamp ?? now) + windowMs + 1000;
+          bestExpiry !== now ? bestExpiry : (queue.at(-1)?.timestamp ?? now) + windowMs + 1000;
       }
 
       const waitMs = targetExpiry - Date.now();
       if (waitMs <= 0) return;
 
-      // Real live countdown in Pi footer (only show when wait is noticeable to avoid flicker)
-      const endTime = Date.now() + waitMs;
-      while (Date.now() < endTime) {
-        if (ctx.signal?.aborted) break;
-        const remainingMs = endTime - Date.now();
-        if (remainingMs >= 300) {
-          const remainingSec = Math.max(1, Math.ceil(remainingMs / 1000));
-          ctx.ui.setStatus(
-            "gemini-pacer",
-            `⏳ Pacing Gemini (${remainingSec}s to clear 2M TPM window)...`,
-          );
-        }
-        const chunk = Math.min(1000, remainingMs);
-        try {
-          await sleep(chunk, ctx.signal);
-        } catch {
-          break;
-        }
-      }
-
-      ctx.ui.setStatus("gemini-pacer", undefined);
-
-      // Prune records that expired during the wait
-      const afterWait = Date.now();
-      while (tokenQueue.length > 0 && afterWait - tokenQueue[0].timestamp > windowMs) {
-        tokenQueue.shift();
-      }
+      const tpmLabel = `${(tpmLimit / 1_000_000).toFixed(tpmLimit % 1_000_000 === 0 ? 0 : 1)}M`;
+      await sleepWithCountdown(
+        waitMs,
+        "gemini-pacer",
+        (secs) => `⏳ Pacing Gemini (${secs}s to clear ${tpmLabel} TPM window)...`,
+        ctx,
+        ctx.signal,
+      );
+      pruneExpired(queue, Date.now());
     });
 
-    // Clear pacer status at the end of each turn
     pi.on("turn_end", (_event: TurnEndEvent, ctx: ExtensionContext) => {
       currentCtx = ctx;
       ctx.ui.setStatus("gemini-pacer", undefined);
