@@ -5,10 +5,11 @@ description: "Debug and profile a running JVM: jdb breakpoints and state inspect
 
 # Java debugging and diagnostics
 
-All tools here ship with the JDK and work on a JVM that is already running.
+All tools here ship with the JDK. There are two distinct approaches:
 
-- **jdb** connects to the JDWP agent over a TCP port. The JVM must start with the agent (see [Debugger](#debugger-jdb)). jdb can stop threads, read and change state, and run code in the target. Use it to confirm which code path runs, which object a method gets, and what a field holds.
-- **jcmd, jstat, jfr** use the local attach API by PID. They need no JVM options, but must run on the same host (or in the same container) as the target, as the same user. They only observe: they do not stop threads, except a full GC for heap histograms and dumps.
+- **Interactive debugger (`jdb` over JDWP)**: Stops threads, inspects/changes state, steps, and runs code over TCP. Requires starting the JVM with `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=localhost:5005` (`suspend=y` waits before `main()`; bind `localhost`, no auth), unless a dev runner enables it (e.g., `quarkus:dev` on port 5005).
+- **Live observer (`jcmd`, `jstat`, `jfr` via Attach API)**: Observes without stopping threads (except full GC for heap histograms/dumps). Needs no JVM flags or restart; attaches by PID on the same host/container as the same user.
+
 - **jstat** prints counters the JVM always keeps (heap areas, GC counts and times) at an interval. It shows that something is wrong, not which code causes it.
 - **JFR** (Java Flight Recorder) records events inside the JVM to a `.jfr` file: CPU samples, allocations, lock waits, GC pauses, exceptions, I/O, with stack traces. Overhead is about 1% with `settings=default`, a few percent with `settings=profile`. `jfr view` turns the file into tables.
 
@@ -21,23 +22,12 @@ In scripts, take care with `pgrep -f <name>`: it also matches the shell running 
 
 # Debugger (jdb)
 
-The target JVM must run with the JDWP agent:
-
-```
--agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=localhost:5005
-```
-
-`suspend=y` makes the JVM wait for a debugger before `main()`.
-Bind to `localhost`: JDWP has no authentication, and anyone who can connect can run code in the JVM.
-Check that the port is open with `ss -ltnp | grep 5005`.
-
 ## Facts to know before you start
 
 - The JDWP agent accepts one debugger at a time. A second attach fails with `java.net.ConnectException: Connection refused`.
 - Attach and detach do not restart the target. Detaching (`exit`, or killing jdb) clears all breakpoints and resumes all threads.
 - On attach, jdb sets `catch uncaught java.lang.Throwable`. An uncaught exception in any thread then stops the JVM. Run `ignore uncaught java.lang.Throwable` if you do not need it.
 - `print` of a method call, and `print obj` (which calls `toString()`), runs code in the target. Call only methods without side effects.
-- Do not print objects that can hold secrets (keys, passwords, tokens). Print `keySet()` or `size()` instead.
 - Local variables need classes compiled with `-g` (Maven and Gradle do this by default). JDK classes show `No local variables`; read their fields with `dump this`.
 
 ## Drive jdb from a persistent pysess session
@@ -63,7 +53,7 @@ EOF
 | Call | Does |
 |---|---|
 | `j.cmd("...")` | Send one jdb command, return its output. |
-| `j.p("expr")` | `print expr`, return only the value. Resumes other threads after a method call (see pitfalls). |
+| `j.p("expr")` | `print expr`, return only the value. Resumes other threads after a method call (see pitfalls); pass `release=False` or set `j.release_after_invoke = False` to keep a stop-all stop in place. |
 | `j.wait_hit(timeout)` | Wait for the next breakpoint, watchpoint, exception or step event. Select its thread, store it in `j.thread`, return the event line. |
 | `j.cont()` | Resume the thread of the last event. |
 | `j.collect(exprs, count, keep)` | Logging or conditional breakpoint: at each event evaluate `exprs` and resume, until `keep(values)` is true. |
@@ -100,16 +90,16 @@ print(order.result(timeout=10))
 | `stop <thread_id> in C.m` | All threads | Fires only for that thread. |
 | `catch caught\|uncaught\|all <Exception>` | All threads | Stops where the exception is thrown, with the throwing stack. |
 | `watch [access\|all] C.field` | All threads | Stops when the field is assigned (`all`: also read). Prints old and new value. |
-| `trace go methods` | Nothing | Prints every method entry and exit with return values. About 40 µs per event: a request with many small calls became 900 times slower in a test. Set `exclude java.*,javax.*,jdk.*,sun.*,com.sun.*` first. |
+| `trace go methods` | Nothing | Prints every method entry and exit with return values. Very slow on hot code (~40 µs/event, can slow call-heavy requests by orders of magnitude). Set `exclude java.*,javax.*,jdk.*,sun.*,com.sun.*` first. |
 
-Notes (verified on JDK 25):
+Notes:
 
 - jdb has no conditional breakpoints. Use `j.collect(...)` with a `keep` function.
 - For overloaded methods, give the signature: `stop thread in C.m(java.lang.String,int)`.
 - `clear` without arguments lists breakpoints. Watches are not listed; remove them with `unwatch`.
 - `catch` on a class that is not loaded yet is deferred and set when the class loads.
 - A watchpoint fires on assignments to the field only, not on changes inside the object it points to (for example `map.remove()`).
-- Avoid: `watch go` (printed wrong values), `trace go methods <thread_id>` (printed nothing), `trace method exit` (reports a callee's exit), `monitor` (does not run for `stop thread` or `stop go` events; use `j.collect`).
+- Avoid: `watch go` (prints wrong values), `trace go methods <thread_id>` (produces no output), `trace method exit` (reports a callee's exit), `monitor` (does not run for `stop thread` or `stop go` events; use `j.collect`).
 
 ## Thread selection and resume pitfalls
 
@@ -130,7 +120,7 @@ Notes (verified on JDK 25):
 - Source: `list` shows `Source file not found` until you set the path: `use src/main/java:other/src/main/java`. `use` replaces the whole path.
 - Discovery: `classes` (all loaded classes), `methods C`, `fields C`.
 
-Expression language (verified on JDK 25):
+Expression language:
 
 | Works | Does not work |
 |---|---|
@@ -229,7 +219,6 @@ jstat -gcutil $PID 1000 10                # GC use in percent, every 1 s, 10 tim
 Rising `O` after each young GC, and rising `FGC`, point to a leak or a too small heap.
 
 `GC.class_histogram` and `GC.heap_dump` run a full GC and pause the JVM.
-A heap dump contains all data in memory, including secrets; keep it local and delete it after use.
 
 ## Profiling with JFR
 
@@ -245,7 +234,6 @@ jfr view hot-methods /tmp/r.jfr
 - `jfr summary file.jfr` lists event counts. `jfr view --width 160 <view> file.jfr` gives wider columns.
 - `jfr help view` lists all views. Useful ones: `hot-methods`, `cpu-time-hot-methods`, `allocation-by-site`, `allocation-by-class`, `contention-by-site`, `gc`, `gc-pauses`, `exception-by-site`, `thread-cpu-load`, `cpu-load`, `latencies-by-type`, `socket-reads-by-host`.
 - `jfr print --events <type> file.jfr` prints raw events with stack traces, for example `jdk.MethodTrace`.
-- A recording includes the environment variables of the process (event `jdk.InitialEnvironmentVariable`), so it can contain secrets.
 
 ## Method timing and tracing (JDK 25+)
 
@@ -273,7 +261,7 @@ jfr view memory-leaks-by-site /tmp/leak.jfr
 ```
 
 The view lists sampled objects that are still alive, with the allocating method.
-Without `memory-leaks=gc-roots` the view was empty in a test.
+`memory-leaks=gc-roots` is required; without it, the view is empty.
 A simpler check: run `GC.class_histogram` before and after the load and compare the counts.
 
 ## Benchmarking
@@ -284,7 +272,7 @@ A simpler check: run `GC.class_histogram` before and after the load and compare 
 4. Repeat each run at least 3 times. Report the spread, not only one number. Do not compare runs where the machine had other load.
 5. Use JFR views to explain the difference: `hot-methods`, `allocation-by-site`, `gc`, `contention-by-site`.
 
-Load generators (see the echoclient skill; `ab` also works):
+Load generators (see the [echoclient skill](../echoclient/SKILL.md); `ab` also works):
 
 ```bash
 go run github.com/tsaarni/echoclient/cmd/echoclient@latest get \
@@ -308,7 +296,6 @@ Turn it on with JVM startup options (or in `JAVA_TOOL_OPTIONS`):
 ```
 
 - Use the same value for both ports, so one tunnel or port forward is enough.
-- Set `java.rmi.server.hostname` to the address the client connects to. Without it, the server tells the client to reconnect to the address of the host name (seen: `Connection refused to host: 127.0.1.1`).
+- Set `java.rmi.server.hostname` to the address the client connects to. Without it, the server tells the client to reconnect to the address of the host name (for example, `Connection refused to host: 127.0.1.1`).
 - Without authentication and SSL, anyone who reaches the port controls the JVM. Bind to localhost and use a tunnel, or turn on authentication.
 - With a shell on the host, `jcmd <pid> ManagementAgent.start jmxremote.port=...` starts the same agent at runtime, and `ManagementAgent.stop` stops it.
-- Attaching by PID with the Attach API and `startLocalManagementAgent()` starts the local agent. It listens on all interfaces, cannot be stopped, and stays until the JVM exits.

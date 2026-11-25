@@ -10,7 +10,8 @@ import subprocess
 import threading
 import time
 
-PROMPT = re.compile(r"(^|\n)(> |\S+\[\d+\] )$")
+PROMPT = re.compile(r"(^|\n)(> |[^\[\n]+\[\d+\] )$")
+INLINE_PROMPT = re.compile(r": (> |[^\[\n]+\[\d+\] )")
 # Events that jdb prints asynchronously. The prompt can be printed in the middle
 # of the line ('Breakpoint hit: worker-6[1] "thread=worker-6", ...').
 EVENT = re.compile(r"(Breakpoint hit|Exception occurred|Field \(|Step completed|Method (entered|exited)): [^\n]*\n")
@@ -59,17 +60,23 @@ class Jdb:
         self.proc.stdin.flush()
         return self.out(**kw)
 
-    def p(self, expr):
+    def p(self, expr, release=None):
         """`print <expr>`, return only the value (or the jdb error text).
 
         A method call in expr leaves the whole VM suspended; release_others() undoes
-        that. Set release_after_invoke = False to keep a suspend-all stop in place.
+        that. Pass release=False or set release_after_invoke = False to keep a
+        suspend-all stop in place.
         """
         o = self.cmd("print " + expr).strip()
-        if self.thread and self.release_after_invoke:
+        if release is None:
+            release = self.release_after_invoke
+        if self.thread and release:
             self.release_others()
-        line = o.splitlines()[0] if o else ""
-        return line.split(" = ", 1)[1] if " = " in line else line
+        lines = [l for l in o.splitlines() if not PROMPT.match(l + " ")]
+        for line in lines:
+            if " = " in line:
+                return line.split(" = ", 1)[1]
+        return lines[0] if lines else ""
 
     def release_others(self):
         """Resume every thread except the current one.
@@ -124,8 +131,9 @@ class Jdb:
             if time.time() > end or self.proc.poll() is not None:
                 raise TimeoutError("no event within %ss:\n%s" % (timeout, self._buf[self._evpos:]))
             time.sleep(0.05)
-        self.out(timeout=1)  # consume the prompt that follows the event
         line = m.group(0).strip()
+        if not INLINE_PROMPT.search(line):
+            self.out(timeout=1)  # consume the prompt that follows the event
         t = re.search(r'"thread=([^"]+)"', line)
         if t:
             self.select(t.group(1))

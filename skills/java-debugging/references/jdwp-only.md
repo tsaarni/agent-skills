@@ -5,8 +5,6 @@ Each method call pauses the JVM briefly, so use this for snapshots, not for moni
 
 JDWP access also exposes secrets: `print java.lang.System.getenv("DB_PASSWORD")`, `System.getProperty(...)` and the JVM arguments can all be read.
 
-All of the following was verified on JDK 25.
-
 ## Getting a thread for method calls
 
 Method calls need a thread stopped by an event; after `suspend` they fail with `Thread not suspended for method invoke`.
@@ -15,7 +13,7 @@ On an idle JVM:
 - Best: set a breakpoint on a timed wait that JDK threads call regularly, and wait without sending any request:
   ```python
   j.cmd("stop thread in java.lang.Object.wait(long)")
-  print(j.wait_hit(60))            # a timer thread hit it after 8 s in a test
+  print(j.wait_hit(60))            # waits for a background/timer thread to hit wait()
   j.cmd("clear java.lang.Object.wait(long)")
   # ... j.p(...) calls ...
   j.cont()
@@ -23,7 +21,7 @@ On an idle JVM:
   Other candidates: `java.util.concurrent.locks.LockSupport.parkNanos(java.lang.Object,long)`, `java.lang.Thread.sleep(long)`. Overloaded JDK methods need the signature.
 - Or send a request that hits a breakpoint in the application.
 - With side effects: `catch caught java.lang.InterruptedException`, then `interrupt <thread_id>` of an idle pool thread. The interrupt can break application code, for example it closes interruptible NIO channels.
-- Does not work: `suspend`, `thread <id>`, `step`. A step on a thread that does not run stays pending (see the pitfalls in SKILL.md).
+- Does not work: `suspend`, `thread <id>`, `step`. A step on a thread that does not run stays pending (see the pitfalls in [SKILL.md](../SKILL.md)).
 
 ## JVM metrics
 
@@ -50,7 +48,7 @@ In the table, `M` stands for `java.lang.management.ManagementFactory`; write the
 
 ## Changing log levels (java.util.logging)
 
-This turned on FINE and FINER logging of the JDK HTTP server without a restart:
+Example: enable FINE and FINER logging for the JDK HTTP server without a restart:
 
 ```
 print java.util.logging.Logger.getLogger("com.sun.net.httpserver").setLevel(java.util.logging.Level.ALL)
