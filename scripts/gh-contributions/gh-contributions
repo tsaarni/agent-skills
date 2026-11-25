@@ -5,7 +5,7 @@ Fetch GitHub contributions using the `gh` CLI, grouped by repository, type, and 
 Queries:
   authored   - Issues and PRs created by the user
   reviewed   - PRs reviewed by the user (excluding own)
-  involved   - Issues and PRs the user participated in (excluding authored)
+  commented  - Issues and PRs the user commented on (excluding authored)
 
 Requires: gh CLI (authenticated)
 """
@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
 
@@ -107,14 +108,24 @@ def gh_search(kind, flags, fields, limit=200, qualifiers=None):
         return []
     if not result.stdout.strip():
         return []
-    return json.loads(result.stdout)
+    results = json.loads(result.stdout)
+    if len(results) >= limit:
+        print(
+            f"warning: gh search {kind} returned {len(results)} results (hit --limit={limit}); "
+            "output may be truncated — increase --limit or narrow --period",
+            file=sys.stderr,
+        )
+    return results
 
 
 # ---------------------------------------------------------------------------
 # Contribution fetching
 # ---------------------------------------------------------------------------
 
-FIELDS = ["repository", "state", "title", "url", "number", "createdAt", "closedAt"]
+FIELDS = [
+    "repository", "state", "title", "url", "number",
+    "createdAt", "closedAt", "author", "labels", "commentsCount",
+]
 
 
 def date_range_flag(since, until):
@@ -123,67 +134,60 @@ def date_range_flag(since, until):
     return f">={since}"
 
 
-def fetch_authored(author, created, limit, repo=None):
-    items = []
-    repo_flag = [f"--repo={repo}"] if repo else []
-    for kind, ctype in [("issues", "issue"), ("prs", "pr")]:
-        results = gh_search(kind, [f"--author={author}", f"--created={created}"] + repo_flag, FIELDS, limit)
-        for r in results:
-            r["contribution"] = ctype
-            r["role"] = "author"
-        items.extend(results)
-    return items
+def author_login(item):
+    author = item.get("author")
+    if isinstance(author, dict):
+        return author.get("login", "")
+    return author or ""
 
 
-def fetch_reviewed(author, created, limit, repo=None):
-    repo_flag = [f"--repo={repo}"] if repo else []
-    results = gh_search(
-        "prs",
-        [f"--reviewed-by={author}", f"--created={created}"] + repo_flag,
-        FIELDS, limit,
-        qualifiers=[f"-author:{author}"],
-    )
-    for r in results:
-        r["contribution"] = "pr"
-        r["role"] = "reviewer"
-    return results
-
-
-def fetch_involved(author, created, limit, repo=None):
-    items = []
-    repo_flag = [f"--repo={repo}"] if repo else []
-    for kind, ctype in [("issues", "issue"), ("prs", "pr")]:
-        results = gh_search(
-            kind,
-            [f"--involves={author}", f"--created={created}"] + repo_flag,
-            FIELDS, limit,
-            qualifiers=[f"-author:{author}"],
+def is_bot(item):
+    author = item.get("author")
+    if isinstance(author, dict):
+        login = author.get("login", "")
+        return (
+            bool(author.get("is_bot"))
+            or author.get("type") == "Bot"
+            or login.endswith("[bot]")
+            or login.startswith("app/")
         )
+    login = author or ""
+    return login.endswith("[bot]") or login.startswith("app/")
+
+
+def fetch_all(author, since, until, limit, repo=None, include_bots=False):
+    created = date_range_flag(since, until)
+    repo_flag = [f"--repo={repo}"] if repo else []
+
+    # Run all 5 search queries concurrently while preserving deterministic
+    # priority order (author > reviewer > commented) during collection.
+    queries = [
+        ("issues", "issue", "author", [f"--author={author}", f"--created={created}"] + repo_flag, None),
+        ("prs", "pr", "author", [f"--author={author}", f"--created={created}"] + repo_flag, None),
+        ("prs", "pr", "reviewer", [f"--reviewed-by={author}", f"--created={created}"] + repo_flag, [f"-author:{author}"]),
+        ("issues", "issue", "commented", [f"--commenter={author}", f"--created={created}"] + repo_flag, [f"-author:{author}"]),
+        ("prs", "pr", "commented", [f"--commenter={author}", f"--created={created}"] + repo_flag, [f"-author:{author}"]),
+    ]
+
+    def run_query(q):
+        kind, ctype, role, flags, qualifiers = q
+        results = gh_search(kind, flags, FIELDS, limit, qualifiers=qualifiers)
         for r in results:
             r["contribution"] = ctype
-            r["role"] = "involved"
-        items.extend(results)
-    return items
+            r["role"] = role
+        return results
 
-
-def fetch_all(author, since, until, limit, repo=None):
-    created = date_range_flag(since, until)
+    print("Fetching authored, reviewed, and commented items in parallel...", file=sys.stderr)
     items = []
+    with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+        for batch in pool.map(run_query, queries):
+            items.extend(batch)
 
-    print("Fetching authored issues and PRs...", file=sys.stderr)
-    items.extend(fetch_authored(author, created, limit, repo))
-
-    print("Fetching reviewed PRs...", file=sys.stderr)
-    items.extend(fetch_reviewed(author, created, limit, repo))
-
-    print("Fetching involved issues and PRs...", file=sys.stderr)
-    items.extend(fetch_involved(author, created, limit, repo))
-
-    # Deduplicate: involved overlaps with authored and reviewed.
-    # Keep the more specific role: author > reviewer > involved.
+    # Deduplicate: commented overlaps with authored and reviewed.
+    # Keep the more specific role: author > reviewer > commented.
     seen_urls = {}  # url -> role
     unique = []
-    role_priority = {"author": 0, "reviewer": 1, "involved": 2}
+    role_priority = {"author": 0, "reviewer": 1, "commented": 2}
     for item in items:
         url = item.get("url")
         role = item.get("role")
@@ -198,7 +202,22 @@ def fetch_all(author, since, until, limit, repo=None):
             seen_urls[url] = role
         # else: skip duplicate with lower priority
 
-    return unique
+    bots_filtered = 0
+    if not include_bots:
+        filtered = []
+        for item in unique:
+            if item.get("role") != "author" and is_bot(item):
+                bots_filtered += 1
+            else:
+                filtered.append(item)
+        unique = filtered
+        if bots_filtered:
+            print(
+                f"Filtered {bots_filtered} bot-authored item(s) (use --include-bots to show).",
+                file=sys.stderr,
+            )
+
+    return unique, bots_filtered
 
 
 # ---------------------------------------------------------------------------
@@ -219,12 +238,25 @@ def format_date(iso_str):
         return iso_str[:10] if iso_str else ""
 
 
+def label_names(item):
+    labels = item.get("labels") or []
+    out = []
+    for lbl in labels:
+        if isinstance(lbl, dict) and lbl.get("name"):
+            out.append(lbl["name"])
+        elif isinstance(lbl, str):
+            out.append(lbl)
+    return out
+
+
 def output_json(items):
     out = []
     for item in items:
         entry = dict(item)
         entry["repo"] = repo_name(entry)
         entry.pop("repository", None)
+        entry["author"] = author_login(entry)
+        entry["labels"] = label_names(entry)
         # Normalize Go zero-time to null
         if entry.get("closedAt", "").startswith("0001-"):
             entry["closedAt"] = None
@@ -233,7 +265,7 @@ def output_json(items):
     print()
 
 
-def output_text(items):
+def output_text(items, bots_filtered=0):
     grouped = defaultdict(lambda: defaultdict(list))
     for item in items:
         repo = repo_name(item)
@@ -243,14 +275,14 @@ def output_text(items):
     section_order = [
         ("author", "pr"), ("author", "issue"),
         ("reviewer", "pr"),
-        ("involved", "pr"), ("involved", "issue"),
+        ("commented", "pr"), ("commented", "issue"),
     ]
     section_labels = {
         ("author", "pr"): "Authored PRs",
         ("author", "issue"): "Authored Issues",
         ("reviewer", "pr"): "Reviewed PRs",
-        ("involved", "pr"): "Involved PRs",
-        ("involved", "issue"): "Involved Issues",
+        ("commented", "pr"): "Commented PRs",
+        ("commented", "issue"): "Commented Issues",
     }
     state_order = {"open": 0, "merged": 1, "closed": 2}
 
@@ -262,11 +294,35 @@ def output_text(items):
         by_state[item.get("state", "unknown").lower()] += 1
 
     print(f"Total: {len(items)}  "
-          f"(authored: {by_role['author']}, reviewed: {by_role['reviewer']}, involved: {by_role['involved']})")
+          f"(authored: {by_role['author']}, reviewed: {by_role['reviewer']}, commented: {by_role['commented']})")
     print(f"State: open: {by_state.get('open', 0)}, merged: {by_state.get('merged', 0)}, closed: {by_state.get('closed', 0)}")
+    if bots_filtered:
+        print(f"Bots:  {bots_filtered} bot-authored item(s) hidden (use --include-bots to show)")
+
+    # Sort repos by contribution volume descending (ties broken alphabetically)
+    sorted_repos = sorted(
+        grouped.keys(),
+        key=lambda r: (-sum(len(v) for v in grouped[r].values()), r),
+    )
+
+    # Primary focus areas table
+    total_count = len(items)
+    name_width = max(len(r) for r in sorted_repos)
+    print("\nFocus areas:")
+    for repo in sorted_repos:
+        sections = grouped[repo]
+        repo_total = sum(len(v) for v in sections.values())
+        pct = round(repo_total * 100 / total_count) if total_count else 0
+        r_authored = len(sections.get(("author", "pr"), [])) + len(sections.get(("author", "issue"), []))
+        r_reviewed = len(sections.get(("reviewer", "pr"), []))
+        r_commented = len(sections.get(("commented", "pr"), [])) + len(sections.get(("commented", "issue"), []))
+        print(
+            f"  {repo:<{name_width}}  {repo_total:>3} ({pct:>3}%)  "
+            f"authored: {r_authored}, reviewed: {r_reviewed}, commented: {r_commented}"
+        )
     print()
 
-    for repo in sorted(grouped.keys()):
+    for repo in sorted_repos:
         sections = grouped[repo]
         repo_total = sum(len(v) for v in sections.values())
         print(f"{'=' * 78}")
@@ -295,11 +351,333 @@ def output_text(items):
         print()
 
 
+def output_markdown(items, bots_filtered=0):
+    grouped = defaultdict(list)
+    by_role = defaultdict(int)
+    by_state = defaultdict(int)
+    for item in items:
+        grouped[repo_name(item)].append(item)
+        by_role[item["role"]] += 1
+        by_state[item.get("state", "unknown").lower()] += 1
+
+    print(
+        f"**Total:** {len(items)} "
+        f"(authored: {by_role['author']}, reviewed: {by_role['reviewer']}, commented: {by_role['commented']}) | "
+        f"**State:** open: {by_state.get('open', 0)}, merged: {by_state.get('merged', 0)}, closed: {by_state.get('closed', 0)}"
+    )
+    if bots_filtered:
+        print(f"**Bots filtered:** {bots_filtered} bot-authored item(s)")
+    print()
+
+    sorted_repos = sorted(grouped.keys(), key=lambda r: (-len(grouped[r]), r))
+    role_order = {"author": 0, "reviewer": 1, "commented": 2}
+    type_order = {"pr": 0, "issue": 1}
+
+    print("## Focus areas\n")
+    print("| Repository | Total | Authored | Reviewed | Commented |")
+    print("| --- | ---: | ---: | ---: | ---: |")
+    for repo in sorted_repos:
+        ritems = grouped[repo]
+        r_a = sum(1 for x in ritems if x["role"] == "author")
+        r_r = sum(1 for x in ritems if x["role"] == "reviewer")
+        r_c = sum(1 for x in ritems if x["role"] == "commented")
+        print(f"| {repo} | {len(ritems)} | {r_a} | {r_r} | {r_c} |")
+    print()
+
+    for repo in sorted_repos:
+        ritems = sorted(
+            grouped[repo],
+            key=lambda x: (
+                role_order.get(x["role"], 99),
+                type_order.get(x["contribution"], 99),
+                x.get("createdAt", ""),
+            ),
+        )
+        print(f"## {repo} ({len(ritems)})\n")
+        for item in ritems:
+            role = item["role"]
+            ctype = item["contribution"]
+            state = item.get("state", "?").lower()
+            num = item.get("number", "")
+            url = item.get("url", "")
+            created = format_date(item.get("createdAt"))
+            cc = item.get("commentsCount", 0)
+            title = item.get("title", "")
+            lbls = label_names(item)
+            lbl_str = f" `{', '.join(lbls)}`" if lbls else ""
+            print(f"- `{role}:{ctype}:{state}` [#{num}]({url}) ({created}, c={cc}) {title}{lbl_str}")
+        print()
+
+
+# ---------------------------------------------------------------------------
+# Inspect mode
+# ---------------------------------------------------------------------------
+
+def resolve_user(author):
+    """Resolve '@me' to the authenticated GitHub login."""
+    if author != "@me":
+        return author
+    result = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        print(f"error: failed to resolve @me: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    return result.stdout.strip()
+
+
+def parse_item_ref(ref):
+    """Parse a GitHub PR/issue URL or owner/repo#number into (repo, number, kind)."""
+    ref = ref.strip()
+    m = re.fullmatch(r"https?://github\.com/([^/]+/[^/]+)/(pull|issues)/(\d+)(?:/.*)?", ref)
+    if m:
+        kind = "pr" if m.group(2) == "pull" else "issue"
+        return m.group(1), int(m.group(3)), kind
+
+    m = re.fullmatch(r"([^/]+/[^/#]+)#(\d+)", ref)
+    if m:
+        return m.group(1), int(m.group(2)), None
+
+    print(f"warning: unrecognized item reference: {ref}", file=sys.stderr)
+    return None, None, None
+
+
+def gh_json(cmd):
+    """Run a gh command returning JSON; return parsed data or None on error."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return json.loads(result.stdout)
+
+
+def inspect_pr(repo, number, user, parallel_comments=True):
+    pr_cmd = [
+        "gh", "pr", "view", str(number), "--repo", repo,
+        "--json", "title,state,url,author,labels,body,files,closingIssuesReferences,reviews,comments",
+    ]
+    comments_cmd = ["gh", "api", f"repos/{repo}/pulls/{number}/comments"]
+
+    if parallel_comments:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_pr = pool.submit(gh_json, pr_cmd)
+            f_inline = pool.submit(gh_json, comments_cmd)
+            pr = f_pr.result()
+            inline_raw = f_inline.result() or []
+    else:
+        pr = gh_json(pr_cmd)
+        if pr is None:
+            return None
+        inline_raw = gh_json(comments_cmd) or []
+
+    if pr is None:
+        return None
+
+    user_lower = user.lower()
+
+    # Inline review comments
+    user_review_comments = [
+        {"path": c.get("path", ""), "body": (c.get("body") or "").strip()}
+        for c in inline_raw
+        if ((c.get("user") or {}).get("login") or "").lower() == user_lower
+        and (c.get("body") or "").strip()
+    ]
+
+    # Top-level reviews
+    user_reviews = [
+        {"state": r.get("state", ""), "body": (r.get("body") or "").strip()}
+        for r in (pr.get("reviews") or [])
+        if ((r.get("author") or {}).get("login") or "").lower() == user_lower
+    ]
+
+    # Conversation comments
+    user_comments = [
+        (c.get("body") or "").strip()
+        for c in (pr.get("comments") or [])
+        if ((c.get("author") or {}).get("login") or "").lower() == user_lower
+        and (c.get("body") or "").strip()
+    ]
+
+    files = [
+        {
+            "path": f.get("path", ""),
+            "additions": f.get("additions", 0),
+            "deletions": f.get("deletions", 0),
+        }
+        for f in (pr.get("files") or [])
+    ]
+
+    closes = [
+        ref["number"]
+        for ref in (pr.get("closingIssuesReferences") or [])
+        if isinstance(ref, dict) and "number" in ref
+    ]
+
+    return {
+        "repo": repo,
+        "number": number,
+        "contribution": "pr",
+        "url": pr.get("url", ""),
+        "title": pr.get("title", ""),
+        "state": (pr.get("state") or "").lower(),
+        "author": author_login(pr),
+        "labels": label_names(pr),
+        "closes": closes,
+        "files": files,
+        "body": (pr.get("body") or "").strip(),
+        "userReviews": user_reviews,
+        "userReviewComments": user_review_comments,
+        "userComments": user_comments,
+    }
+
+
+def inspect_issue(repo, number, user):
+    issue = gh_json([
+        "gh", "issue", "view", str(number), "--repo", repo,
+        "--json", "title,state,url,author,labels,body,comments",
+    ])
+    if issue is None:
+        return None
+
+    user_lower = user.lower()
+    comments = issue.get("comments") or []
+    user_comments = [
+        (c.get("body") or "").strip()
+        for c in comments
+        if ((c.get("author") or {}).get("login") or "").lower() == user_lower
+        and (c.get("body") or "").strip()
+    ]
+
+    return {
+        "repo": repo,
+        "number": number,
+        "contribution": "issue",
+        "url": issue.get("url", ""),
+        "title": issue.get("title", ""),
+        "state": (issue.get("state") or "").lower(),
+        "author": author_login(issue),
+        "labels": label_names(issue),
+        "commentsCount": len(comments),
+        "body": (issue.get("body") or "").strip(),
+        "userComments": user_comments,
+    }
+
+
+def _compact_text(text, max_len):
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if max_len and len(text) > max_len:
+        return text[: max_len - 1].rstrip() + "…"
+    return text
+
+
+def output_inspect_markdown(results, max_body=500):
+    for it in results:
+        repo = it["repo"]
+        num = it["number"]
+        ctype = it["contribution"]
+        state = it["state"]
+        author = it["author"]
+        title = it["title"]
+        url = it["url"]
+        print(f"### [{repo}#{num}]({url}) [{ctype} {state}] by {author} — {title}")
+
+        meta = []
+        if it.get("labels"):
+            meta.append("Labels: " + ", ".join(it["labels"]))
+        if it.get("closes"):
+            meta.append("Closes: " + ", ".join(f"#{n}" for n in it["closes"]))
+        if meta:
+            print("- " + " | ".join(meta))
+
+        files = it.get("files") or []
+        if files:
+            top = ", ".join(f"`{f['path']}` (+{f['additions']}/-{f['deletions']})" for f in files[:10])
+            more = f" (+{len(files) - 10} more)" if len(files) > 10 else ""
+            print(f"- **Files ({len(files)}):** {top}{more}")
+
+        body = _compact_text(it.get("body"), max_body)
+        if body:
+            print(f"- **Body:** {body}")
+
+        for r in it.get("userReviews") or []:
+            rb = _compact_text(r.get("body"), max_body)
+            suffix = f": {rb}" if rb else ""
+            print(f"- **Review ({r['state']})**{suffix}")
+
+        for rc in it.get("userReviewComments") or []:
+            print(f"- **Inline (`{rc['path']}`):** {_compact_text(rc.get('body'), max_body)}")
+
+        for c in it.get("userComments") or []:
+            print(f"- **Comment:** {_compact_text(c, max_body)}")
+
+        print()
+
+
+def main_inspect(argv):
+    parser = argparse.ArgumentParser(
+        prog="gh-contributions inspect",
+        description="Fetch rich details (files, linked issues, reviews, comments) for specific PRs/issues.",
+        epilog="""item formats:
+  https://github.com/owner/repo/pull/123   (preferred: avoids type probe)
+  https://github.com/owner/repo/issues/123
+  owner/repo#123
+  (or pass references one per line on stdin)""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("items", nargs="*", help="PR/issue references to inspect")
+    parser.add_argument("--author", default="@me",
+                        help="target GitHub username for filtering reviews/comments (default: @me)")
+    parser.add_argument("--format", choices=["json", "markdown"], default="json",
+                        help="output format (default: json)")
+    parser.add_argument("--max-body", type=int, default=500,
+                        help="max chars per body/comment in markdown mode, 0 for unlimited (default: 500)")
+    args = parser.parse_args(argv)
+
+    refs = list(args.items)
+    if not refs and not sys.stdin.isatty():
+        refs = [line.strip() for line in sys.stdin if line.strip()]
+    if not refs:
+        parser.error("provide at least one PR/issue reference (as arguments or via stdin)")
+
+    user = resolve_user(args.author)
+    parsed = []
+    for ref in refs:
+        repo, number, kind = parse_item_ref(ref)
+        if repo:
+            parsed.append((repo, number, kind))
+
+    def inspect_one(entry):
+        repo, number, kind = entry
+        if kind == "pr":
+            data = inspect_pr(repo, number, user, parallel_comments=True)
+        elif kind == "issue":
+            data = inspect_issue(repo, number, user)
+        else:
+            data = inspect_pr(repo, number, user, parallel_comments=False) or inspect_issue(repo, number, user)
+        if data is None:
+            print(f"warning: failed to inspect {repo}#{number}", file=sys.stderr)
+        return data
+
+    print(f"Inspecting {len(parsed)} item(s) in parallel...", file=sys.stderr)
+    results = []
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(parsed)))) as pool:
+        for data in pool.map(inspect_one, parsed):
+            if data is not None:
+                results.append(data)
+
+    if args.format == "markdown":
+        output_inspect_markdown(results, max_body=args.max_body)
+    else:
+        json.dump(results, sys.stdout, indent=2)
+        print()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "inspect":
+        main_inspect(sys.argv[2:])
+        return
+
     parser = argparse.ArgumentParser(
         description="Fetch GitHub contributions grouped by repository, type, and state.",
         epilog="""period formats:
@@ -308,7 +686,10 @@ def main():
   YYYY                     full year
   YYYY-MM                  full month
   q1..q4 or YYYY-q1..q4   quarter
-  last-N-days              rolling window""",
+  last-N-days              rolling window
+
+subcommands:
+  gh-contributions inspect <owner/repo#num|url>...   fetch rich PR/issue details""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--period", default="last-365-days",
@@ -319,14 +700,18 @@ def main():
                         help="filter to a specific repository (owner/repo)")
     parser.add_argument("--limit", type=int, default=200,
                         help="max results per query (default: 200, max: 1000)")
-    parser.add_argument("--format", choices=["text", "json"], default=None,
+    parser.add_argument("--include-bots", action="store_true",
+                        help="include bot-authored PRs and issues (filtered out by default)")
+    parser.add_argument("--format", choices=["text", "json", "markdown"], default=None,
                         help="output format (default: json when piped, text when interactive)")
     args = parser.parse_args()
 
     since, until = parse_period(args.period)
     print(f"Period: {since} .. {until or 'now'}", file=sys.stderr)
 
-    items = fetch_all(args.author, since, until, args.limit, args.repo)
+    items, bots_filtered = fetch_all(
+        args.author, since, until, args.limit, args.repo, include_bots=args.include_bots
+    )
 
     if not items:
         print("No contributions found.", file=sys.stderr)
@@ -338,8 +723,10 @@ def main():
 
     if fmt == "json":
         output_json(items)
+    elif fmt == "markdown":
+        output_markdown(items, bots_filtered=bots_filtered)
     else:
-        output_text(items)
+        output_text(items, bots_filtered=bots_filtered)
 
 
 if __name__ == "__main__":
