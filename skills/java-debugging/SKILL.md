@@ -52,18 +52,25 @@ EOF
 
 | Call | Does |
 |---|---|
-| `j.cmd("...")` | Send one jdb command, return its output. |
-| `j.p("expr")` | `print expr`, return only the value. Resumes other threads after a method call (see pitfalls); pass `release=False` or set `j.release_after_invoke = False` to keep a stop-all stop in place. |
+| `j.cmd("...")` | Send one raw jdb command, return its output. |
+| `j.bp(loc, suspend="thread")` | Set breakpoint at `C.m` or `C:line` (`suspend`: `"thread"`, `"all"`, or `"go"`). Raises `RuntimeError` if `jdb` rejects it. |
+| `j.bps()` / `j.clear(loc=None)` | List breakpoints / clear one breakpoint or all breakpoints when `loc` is omitted. |
+| `j.catch(exc, mode="caught")` / `j.ignore(...)` | Set or remove an exception breakpoint (`mode`: `"caught"`, `"uncaught"`, `"all"`). |
+| `j.watch(field, mode="write")` / `j.unwatch(...)` | Set or remove a field watchpoint (`mode`: `"write"`, `"access"`, `"all"`). |
+| `j.temp_bp(...)` / `j.temp_watch(...)` / `j.temp_catch(...)` | Context managers that always clear/unwatch/ignore on exit. |
+| `j.p("expr")` / `j.set(target, value)` | `print expr` (returns value; resumes other threads after a method call on thread-only stops, keeps suspend-all stops paused unless `release=True`) / `set target = value`. |
 | `j.wait_hit(timeout)` | Wait for the next breakpoint, watchpoint, exception or step event. Select its thread, store it in `j.thread`, return the event line. |
-| `j.cont()` | Resume the thread of the last event. |
-| `j.collect(exprs, count, keep)` | Logging or conditional breakpoint: at each event evaluate `exprs` and resume, until `keep(values)` is true. |
-| `j.threads()` | `{name: (id, status)}`. |
-| `j.select(name)` | Make a thread current. |
+| `j.cont()` / `j.resume()` | Resume the thread of the last event (`cont`) or all threads (`resume`, for suspend-all stops). |
+| `j.next()` / `j.step()` / `j.step_up()` | Step over, into, or out of a method and wait for the `Step completed` event. |
+| `j.collect(exprs, count, timeout, keep)` | Logging or conditional breakpoint: at each event evaluate `exprs` and resume, until `keep(values)` is true. `timeout` is a total deadline; returns partial rows if it expires after at least one hit. |
+| `j.inspect(depth)` | One-shot summary of current thread, locals/args, and top `depth` stack frames. |
+| `j.where(depth)` / `j.locals()` / `j.dump(expr)` / `j.list()` | Stack frames, locals/args, object fields (without calling `toString()`), and source lines (rendered multi-line in `pysess`). |
+| `j.up(n)` / `j.down(n)` | Move up/down `n` stack frames. |
+| `j.threads()` / `j.select(name)` | `{name: (id, status)}` / make a thread current. |
 | `j.release_others()` | Resume every thread except the current one. |
 | `j.field_ref(obj, "field")` | `instance of X(id=N)` for a field, from `dump`. |
-| `j.where(depth)` | Top of the stack of the current thread. |
-| `j.drain()` | Forget events printed so far. |
-| `j.cleanup()` | Clear breakpoints, resume all threads, detach. |
+| `j.drain()` | Forget events printed so far and compact the internal buffer. |
+| `j.cleanup()` (or `with Jdb(...) as j:`) | Clear breakpoints, resume all threads, and detach safely. |
 
 A breakpoint blocks the request that hits it, and a pysess session runs one step at a time.
 Send the request with `pysess.bg` (see the pysess skill), then call `wait_hit()`; read the response later with `.result(timeout)`.
@@ -232,7 +239,8 @@ jfr view hot-methods /tmp/r.jfr
 
 - `jcmd $PID JFR.view hot-methods` shows a view of the running recording without writing a file.
 - `jfr summary file.jfr` lists event counts. `jfr view --width 160 <view> file.jfr` gives wider columns.
-- `jfr help view` lists all views. Useful ones: `hot-methods`, `cpu-time-hot-methods`, `allocation-by-site`, `allocation-by-class`, `contention-by-site`, `gc`, `gc-pauses`, `exception-by-site`, `thread-cpu-load`, `cpu-load`, `latencies-by-type`, `socket-reads-by-host`.
+- `jfr help view` lists all views. Useful ones: `hot-methods`, `cpu-time-hot-methods` (JDK 25+), `allocation-by-site`, `allocation-by-class`, `contention-by-site`, `gc`, `gc-pauses`, `exception-by-site`, `thread-cpu-load`, `cpu-load`, `latencies-by-type`, `socket-reads-by-host`.
+- For `exception-by-site` on JDK 21 (where `settings=profile` only records `Error` throws by default), pass `exceptions=all` to `JFR.start`.
 - `jfr print --events <type> file.jfr` prints raw events with stack traces, for example `jdk.MethodTrace`.
 
 ## Method timing and tracing (JDK 25+)
