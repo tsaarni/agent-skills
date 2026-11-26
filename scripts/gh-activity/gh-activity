@@ -1,0 +1,1021 @@
+#!/usr/bin/env python3
+"""
+gh-activity: GitHub activity for AI agents (compact text output). Requires authenticated gh CLI.
+
+  status    current PR status: CI, mergeability, reviews, threads, linked issues, whose turn and how long;
+            --mine (waiting on me), --stats (repo-level counts)
+  history   a user's contributions over a period (PRs + issues; author / reviewer / commented)
+  inspect   rich details of specific PRs/issues (body, files, reviews, inline review comments, comments)
+
+GraphQL search with light fields + batched node lookups only where needed (few API points).
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import time
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
+
+PAGE_SIZE = 25
+SEARCH_CAP = 1000  # GitHub search returns at most 1000 results
+
+PR_FIELDS = """
+      id url number title state createdAt updatedAt mergedAt closedAt isDraft
+      author { __typename login }
+      baseRefName
+      mergeable mergeStateStatus reviewDecision
+      additions deletions changedFiles
+      labels(first: 10) { nodes { name } }
+      repository { nameWithOwner squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed }
+      files(first: 30) { nodes { path } }
+      body @include(if: $body)
+      reviewRequests(first: 10) { nodes { asCodeOwner requestedReviewer {
+        __typename ... on User { login } ... on Team { slug } ... on Bot { login } ... on Mannequin { login } } } }
+      reviewThreads(last: 20) { totalCount nodes { isResolved isOutdated } }
+      closingIssuesReferences(first: 10) { nodes { number state url repository { nameWithOwner } } }
+      latestReviews(first: 20) { nodes { author { __typename login } state submittedAt } }
+      comments(last: $comments) { nodes { author { __typename login } body createdAt } }
+      commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state
+        contexts(first: 0) { totalCount
+          checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }
+"""
+
+QUERY = """
+query($q: String!, $type: SearchType!, $first: Int!, $after: String, $body: Boolean!, $comments: Int!) {
+  rateLimit { cost remaining resetAt }
+  viewer { login }
+  search(query: $q, type: $type, first: $first, after: $after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { %s } }
+  }
+}
+""" % PR_FIELDS
+
+# Second phase, only for PRs that need it (fetched by node id, batched): keeps the search cheap and small.
+CHECKS_QUERY = """
+query($ids: [ID!]!) {
+  rateLimit { cost remaining }
+  nodes(ids: $ids) { ... on PullRequest { id commits(last: 1) { nodes { commit { statusCheckRollup {
+    contexts(first: 100) { nodes {
+      ... on CheckRun { name conclusion status }
+      ... on StatusContext { context state } } } } } } } } }
+}
+"""
+THREADS_QUERY = """
+query($ids: [ID!]!) {
+  rateLimit { cost remaining }
+  nodes(ids: $ids) { ... on PullRequest { id reviewThreads(last: 20) { nodes {
+    comments(last: 1) { nodes { author { __typename login } createdAt } } } } } }
+}
+"""
+URLS_QUERY = """
+query($q: String!, $after: String) {
+  rateLimit { cost remaining }
+  viewer { login }
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { url } } }
+}
+"""
+MERGEABLE_QUERY = """
+query($ids: [ID!]!) {
+  rateLimit { cost remaining }
+  nodes(ids: $ids) { ... on PullRequest { id mergeable mergeStateStatus } }
+}
+"""
+DETAIL_BATCH = 10
+
+FAILED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+PENDING = {"PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING", "REQUESTED"}
+BOT_LOGINS = {"copilot-pull-request-reviewer", "github-actions", "dependabot", "renovate", "codecov", "netlify"}
+BOT_COMMAND = re.compile(r"^\s*@(dependabot|renovate|mergify|k8s-ci-robot)\b|^\s*/\w+", re.I)  # bot commands, not review feedback
+COMMENTS_FETCH = 10
+LABEL_CHECK = re.compile(r"label|release.?note|changelog", re.I)  # needs triage permission: maintainers' job
+DCO_CHECK = re.compile(r"\bDCO\b|sign.?off", re.I)  # author must sign off commits  # fetch more than shown so bot noise doesn't push human activity out of the window
+
+
+# ---------------------------------------------------------------------------
+# GitHub access
+# ---------------------------------------------------------------------------
+
+def gh_graphql(query, variables=None, _retried=False):
+    cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for k, v in (variables or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, list):
+            cmd += [x for item in v for x in ("-f", f"{k}[]={item}")]
+        elif isinstance(v, bool):
+            cmd += ["-F", f"{k}={'true' if v else 'false'}"]
+        elif isinstance(v, int):
+            cmd += ["-F", f"{k}={v}"]
+        else:
+            cmd += ["-f", f"{k}={v}"]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode != 0:
+        err = p.stderr.strip()
+        if re.search(r"HTTP 50[234]|timeout|timed out|unexpected end of JSON", err, re.I):
+            raise TimeoutError(err)
+        if not _retried and re.search(r"secondary rate limit", err, re.I):
+            print("note: secondary rate limit, waiting 60s and retrying once", file=sys.stderr)
+            time.sleep(60)
+            return gh_graphql(query, variables, _retried=True)
+        sys.exit(f"error: gh api graphql failed: {err}")
+    data = json.loads(p.stdout)
+    if data.get("errors"):
+        sys.exit(f"error: {data['errors']}")
+    return data["data"]
+
+
+class Api:
+    def __init__(self):
+        self.cost = 0
+        self.remaining = None
+        self.viewer = None
+
+    def search(self, q, limit, body, comments, advanced=False):
+        """Paginated PR search. Returns (issueCount, nodes)."""
+        nodes, after, total, page = [], None, 0, PAGE_SIZE
+        while len(nodes) < limit:
+            try:
+                d = gh_graphql(QUERY, {"q": q, "type": "ISSUE_ADVANCED" if advanced else "ISSUE",
+                                       "first": min(page, limit - len(nodes)), "after": after,
+                                       "body": body, "comments": max(comments, COMMENTS_FETCH)})
+            except TimeoutError as e:
+                # heavy pages (many checks/files per PR) time out server-side: shrink and retry
+                if page <= 5:
+                    sys.exit(f"error: gh api graphql failed: {e}")
+                page //= 2
+                print(f"note: server timeout, retrying with page size {page}", file=sys.stderr)
+                continue
+            self._account(d)
+            s = d["search"]
+            total = s["issueCount"]
+            nodes += [n for n in s["nodes"] if n]
+            if not s["pageInfo"]["hasNextPage"]:
+                break
+            after = s["pageInfo"]["endCursor"]
+        return total, nodes
+
+    def enrich(self, nodes):
+        """Fetch check names for PRs with failing/pending CI and last thread replies for PRs with threads."""
+        def counts_of(n):
+            ctx = ((n["commits"]["nodes"] or [{}])[0].get("commit") or {}).get("statusCheckRollup") or {}
+            ctx = ctx.get("contexts") or {}
+            cnt = Counter()  # sum: check runs and status contexts share state names (FAILURE, PENDING…)
+            for x in ctx.get("checkRunCountsByState", []) + ctx.get("statusContextCountsByState", []):
+                cnt[x["state"]] += x["count"]
+            return cnt
+        by_id = {n["id"]: n for n in nodes}
+        # GitHub computes mergeability lazily: first query on old PRs returns UNKNOWN; re-ask once
+        unknown = [n["id"] for n in nodes if n["state"] == "OPEN" and n["mergeable"] == "UNKNOWN"]
+        if unknown:
+            time.sleep(3)
+            for i in range(0, len(unknown), 50):
+                d = gh_graphql(MERGEABLE_QUERY, {"ids": unknown[i:i + 50]})
+                self.cost += d["rateLimit"]["cost"]
+                for x in d["nodes"]:
+                    if x:
+                        by_id[x["id"]].update(mergeable=x["mergeable"], mergeStateStatus=x["mergeStateStatus"])
+        need_checks = [n["id"] for n in nodes if any(counts_of(n).get(st) for st in FAILED | PENDING)]
+        need_threads = [n["id"] for n in nodes if n["reviewThreads"]["totalCount"]]
+        for query, ids, key in ((CHECKS_QUERY, need_checks, "checks"), (THREADS_QUERY, need_threads, "threads")):
+            for i in range(0, len(ids), DETAIL_BATCH):
+                d = gh_graphql(query, {"ids": ids[i:i + DETAIL_BATCH]})
+                self.cost += d["rateLimit"]["cost"]
+                self.remaining = d["rateLimit"]["remaining"]
+                for x in d["nodes"]:
+                    if not x:
+                        continue
+                    if key == "checks":
+                        c = x["commits"]["nodes"][0]["commit"]["statusCheckRollup"] if x["commits"]["nodes"] else None
+                        by_id[x["id"]]["_check_nodes"] = ((c or {}).get("contexts") or {}).get("nodes", [])
+                    else:
+                        by_id[x["id"]]["_thread_last"] = [cm for t in x["reviewThreads"]["nodes"] for cm in t["comments"]["nodes"]]
+
+    def urls(self, q, limit):
+        """Light search returning only PR urls."""
+        urls, after = set(), None
+        while len(urls) < limit:
+            d = gh_graphql(URLS_QUERY, {"q": q, "after": after})
+            self._account(d)
+            urls |= {n["url"] for n in d["search"]["nodes"] if n}
+            if not d["search"]["pageInfo"]["hasNextPage"]:
+                break
+            after = d["search"]["pageInfo"]["endCursor"]
+        return d["search"]["issueCount"], urls
+
+    def counts(self, queries, advanced=False):
+        """{name: query} -> {name: issueCount}, one aliased request."""
+        t = "ISSUE_ADVANCED" if advanced else "ISSUE"
+        parts = [f'{k}: search(query: {json.dumps(q)}, type: {t}, first: 0) {{ issueCount }}' for k, q in queries.items()]
+        d = gh_graphql("query { rateLimit { cost remaining } viewer { login } %s }" % "\n".join(parts))
+        self._account(d)
+        return {k: d[k]["issueCount"] for k in queries}
+
+    def _account(self, d):
+        self.cost += d["rateLimit"]["cost"]
+        self.remaining = d["rateLimit"]["remaining"]
+        self.viewer = d["viewer"]["login"]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def parse_since(value):
+    """YYYY-MM-DD or Nd (N days ago) -> YYYY-MM-DD."""
+    m = re.fullmatch(r"(\d+)d", value)
+    if m:
+        return str(date.today() - timedelta(days=int(m.group(1))))
+    try:
+        return str(date.fromisoformat(value))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid --since {value!r}: use YYYY-MM-DD or Nd")
+
+
+def ts(s):
+    return datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
+
+
+def days(t, now):
+    return (now - t).days if t else None
+
+
+def one_line(text, n):
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def bump_body(body):
+    """Dependabot/Renovate PR body -> summary + release notes (changelog if no notes); drop commits, badges, command help."""
+    if not body or not re.search(r"<summary>(Release notes|Changelog|Commits)</summary>", body):
+        return body
+    parts, pos, prev = [], 0, None
+    for m in re.finditer(r"<details>\s*<summary>(.*?)</summary>(.*?)</details>", body, re.S):
+        parts.append(("text", body[pos:m.start()]))
+        parts.append((m.group(1).strip(), m.group(2)))
+        pos = m.end()
+    parts.append(("text", body[pos:]))
+    out = []
+    for kind, txt in parts:
+        if kind == "text":
+            txt = re.split(r"\n\[!\[Dependabot compatibility|\nDependabot will resolve|\n---\s*\n", txt)[0]
+            if txt.strip():  # only real text between blocks starts a new section (grouped PRs)
+                out.append(txt)
+                prev = None
+        elif kind == "Release notes" or (kind == "Changelog" and prev != "Release notes"):
+            # drop upstream's own bot bumps and contributor lists; then tags and the "Sourced from …" line
+            txt = re.sub(r"<li>(?:(?!</li>).)*?(dependabot|renovate|\[bot\]|first contribution)(?:(?!</li>).)*?</li>", "", txt, flags=re.S | re.I)
+            txt = re.sub(r"<h\d>\s*New Contributors\s*</h\d>", "", txt, flags=re.I)
+            txt = re.sub(r"<[^>]+>", " ", txt)
+            txt = re.sub(r"^\s*Sourced from [^\n]*?(releases|changelog)\s*\.?", "", txt, count=1, flags=re.I)
+            out.append(f"{kind}: {txt}")
+            prev = kind
+    return "\n".join(out)
+
+
+def login(a):
+    return (a or {}).get("login") or "ghost"
+
+
+def is_bot(a):
+    return not a or a.get("__typename") == "Bot" or a.get("login", "").endswith("[bot]") or a.get("login") in BOT_LOGINS
+
+
+def base_filters(args):
+    q = [f"repo:{r}" for r in args.repos]
+    if args.author:
+        q.append(f"author:{args.author}")
+    if args.no_draft:
+        q.append("draft:false")
+    return q
+
+
+def build_query(args, extra=()):
+    q = ["is:pr"]
+    if args.state in ("open", "closed"):
+        q.append(f"is:{args.state}")
+    elif args.state == "merged":
+        q.append("is:merged")
+    if args.since:  # merged/closed: filter by when it happened, not creation
+        q.append(f"{ {'merged': 'merged', 'closed': 'closed'}.get(args.state, 'created') }:>={args.since}")
+    q += base_filters(args) + list(extra)
+    # sort server-side so --limit keeps the right PRs (default search order is best-match, arbitrary)
+    q.append({"age": "sort:created-asc", "waiting": "sort:updated-asc"}.get(args.sort, "sort:created-desc"))
+    return " ".join(q)
+
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+
+def analyze(n, now):
+    """Derive check summary, reviewers and whose turn it is."""
+    c = n["commits"]["nodes"][0]["commit"] if n["commits"]["nodes"] else {}
+    roll = c.get("statusCheckRollup") or {}
+    ctx = roll.get("contexts") or {}
+    cnt = Counter()
+    for x in ctx.get("checkRunCountsByState", []) + ctx.get("statusContextCountsByState", []):
+        cnt[x["state"]] += x["count"]
+    names = [((x.get("name") or x.get("context")), (x.get("conclusion") or x.get("state") or x.get("status")))
+             for x in n.get("_check_nodes", []) if x]
+    a = {
+        "checks_total": ctx.get("totalCount", 0),
+        "ci": roll.get("state", "NONE"),
+        "n_failed": sum(cnt[st] for st in FAILED),
+        "n_pending": sum(cnt[st] for st in PENDING),
+        "failed": [nm for nm, st in names if st in FAILED],
+        "pending": [nm for nm, st in names if st in PENDING],
+        "skipped": cnt["SKIPPED"],
+        "passed": cnt["SUCCESS"],
+        "last_commit": ts(c.get("committedDate")),
+    }
+    author = login(n["author"])
+    a["author"] = author
+
+    reviews = {"APPROVED": [], "CHANGES_REQUESTED": [], "COMMENTED": [], "DISMISSED": []}
+    human_reviews = []
+    for r in n["latestReviews"]["nodes"]:
+        reviews.setdefault(r["state"], []).append(login(r["author"]))
+        if not is_bot(r["author"]) and login(r["author"]) != author:
+            human_reviews.append((ts(r["submittedAt"]), login(r["author"]), r["state"]))
+    requested, requested_users = [], []
+    for r in n["reviewRequests"]["nodes"]:
+        x = r["requestedReviewer"] or {}
+        name = x.get("login") or (f"@{n['repository']['nameWithOwner'].split('/')[0]}/{x['slug']}" if x.get("slug") else "hidden")
+        if x.get("__typename") == "User":
+            requested_users.append(name)
+        requested.append(name + ("(codeowner)" if r["asCodeOwner"] else ""))
+    a.update(reviews=reviews, requested=requested, requested_users=requested_users)
+
+    # last activity by author (commits, comments, review-thread replies) vs by other humans (reviews, comments, thread replies)
+    human_comments = [cm for cm in n["comments"]["nodes"] if not is_bot(cm["author"]) and not BOT_COMMAND.match(cm["body"] or "")]
+    thread_last = [cm for cm in n.get("_thread_last", []) if not is_bot(cm["author"])]
+    author_times = [a["last_commit"]] + [ts(cm["createdAt"]) for cm in human_comments + thread_last if login(cm["author"]) == author]
+    other = [(t, who, st) for t, who, st in human_reviews] + [
+        (ts(cm["createdAt"]), login(cm["author"]), "COMMENT") for cm in human_comments + thread_last
+        if login(cm["author"]) != author]
+    last_author = max((t for t in author_times if t), default=ts(n["createdAt"]))
+    last_other_t, last_other_who, last_other_kind = max(other, default=(None, None, None), key=lambda x: x[0])
+    a["last_author"], a["last_other"], a["last_other_who"] = last_author, last_other_t, last_other_who
+
+    ci_bad = a["ci"] in ("FAILURE", "ERROR")
+    real_failed = [f for f in a["failed"] if not LABEL_CHECK.search(f) and not DCO_CHECK.search(f)]
+    a["policy"] = []
+    if ci_bad and a["failed"] and not real_failed and len(a["failed"]) == a["n_failed"]:
+        # only policy checks fail: not a broken build
+        if any(LABEL_CHECK.search(f) for f in a["failed"]):
+            a["policy"].append("label_missing")
+        ci_bad = False
+        dco = any(DCO_CHECK.search(f) for f in a["failed"])
+    else:
+        dco = False
+    if n["state"] != "OPEN":
+        done = ts(n["mergedAt"] or n["closedAt"])
+        turn, why, since = "none", n["state"].lower(), done
+    elif n["isDraft"]:
+        turn, why, since = "author", "draft", last_author
+    elif n["mergeable"] == "CONFLICTING":
+        turn, why, since = "author", "conflicts", max(filter(None, [last_author, last_other_t]))
+    elif ci_bad:
+        turn, why, since = "author", "ci_failed", a["last_commit"] or last_author
+    elif dco:
+        turn, why, since = "author", "dco_missing", a["last_commit"] or last_author
+    elif a["ci"] in ("PENDING", "EXPECTED"):
+        turn, why, since = "ci", "ci_running", a["last_commit"] or last_author
+    elif n["reviewDecision"] == "CHANGES_REQUESTED" and last_other_t and last_other_t > last_author:
+        turn, why, since = "author", "changes_requested", last_other_t
+    elif n["reviewDecision"] == "APPROVED" or (n["reviewDecision"] is None and n["mergeStateStatus"] == "CLEAN"):
+        approved = [t for t, _, st in human_reviews if st == "APPROVED"]
+        turn, why, since = "merge", "approved" if approved else "ready", max(approved + [a["last_commit"] or last_author])
+    elif last_other_t and last_other_t > last_author and last_other_kind == "APPROVED":
+        # approved by someone, but more approvals (e.g. code owners) still required
+        turn, why, since = "reviewers", f"approved_by_{last_other_who}_needs_more", last_other_t
+    elif last_other_t and last_other_t > last_author:
+        turn, why, since = "author", f"feedback_from_{last_other_who}", last_other_t
+    else:
+        turn, why, since = "reviewers", "awaiting_review" if not human_reviews else "awaiting_re-review", last_author
+    if turn == "author" and is_bot(n["author"]):
+        # bot can't fix CI/conflicts/feedback itself: maintainers act (rebase/recreate/fix/close)
+        turn, why = "maintainers", f"{why}(bot_pr)"
+    a["turn"], a["why"], a["since"] = turn, why, since
+    a["waiting_days"] = days(since, now)
+    return a
+
+
+def turn_who(n, a):
+    if a["turn"] == "author":
+        return a["author"]
+    if a["turn"] == "reviewers":
+        return ",".join(a["requested"]) or "maintainers"
+    if a["turn"] in ("merge", "maintainers"):
+        return "maintainers"
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+def render_pr(i, n, a, args, now, out):
+    flags = ["draft"] if n["isDraft"] else []
+    if "mine" in a:
+        flags.append(f"mine={a['mine']}")
+    out.append("")
+    if n["state"] != "OPEN":
+        done = n["mergedAt"] or n["closedAt"]
+        flags.append(f"state={n['state'].lower()}@{done[:10]} open_for={(ts(done) - ts(n['createdAt'])).days}d")
+    out.append(f"{i}. {n['url']} age={days(ts(n['createdAt']), now)}d author={a['author']}"
+               f" base={n['baseRefName']}" + (f" {' '.join(flags)}" if flags else ""))
+    out.append(f"   title: {n['title']}")
+    who = turn_who(n, a)
+    if n["state"] == "OPEN":
+        out.append(f"   turn={a['turn']}" + (f"({who})" if who and who != a["turn"] else "") + f" reason={a['why']} waiting={a['waiting_days']}d"
+                   + (f" policy={','.join(a['policy'])}" if a["policy"] else ""))
+    labels = [l["name"] for l in n["labels"]["nodes"]]
+    if labels:
+        out.append(f"   labels: {','.join(labels)}")
+    unlisted = a["n_failed"] + a["n_pending"] - len(a["failed"]) - len(a["pending"])
+    out.append(f"   ci={a['ci']} checks={a['checks_total']} passed={a['passed']} failed={a['n_failed']}[{','.join(a['failed'])}]"
+               f" pending={a['n_pending']}[{','.join(a['pending'])}] skipped={a['skipped']}"
+               + (f" ({unlisted} not listed, >100 checks)" if unlisted > 0 else ""))
+    out.append(f"   mergeable={n['mergeable']} merge_state={n['mergeStateStatus']} review={n['reviewDecision'] or '-'}")
+    rv = a["reviews"]
+    if any(rv.values()) or a["requested"]:
+        out.append(f"   reviews: approved=[{','.join(rv['APPROVED'])}] changes=[{','.join(rv['CHANGES_REQUESTED'])}]"
+                   f" commented=[{','.join(rv['COMMENTED'])}] requested=[{','.join(a['requested'])}]")
+    files = [f["path"] for f in n["files"]["nodes"]]
+    more = n["changedFiles"] - len(files)
+    out.append(f"   files({n['changedFiles']}) +{n['additions']}/-{n['deletions']}: {','.join(files)}" + (f",…+{more}" if more > 0 else ""))
+    th = n["reviewThreads"]
+    unresolved = [t for t in th["nodes"] if not t["isResolved"]]
+    act = [f"last_activity={days(ts(n['updatedAt']), now)}d"]
+    if a["last_commit"]:
+        act.append(f"last_commit={a['last_commit']:%Y-%m-%d}")
+    act.append(f"last_author_activity={a['last_author']:%Y-%m-%d}")
+    if a["last_other"]:
+        act.append(f"last_other_activity={a['last_other']:%Y-%m-%d}({a['last_other_who']})")
+    out.append("   " + " ".join(act))
+    if th["totalCount"]:
+        seen_t = len(th["nodes"])
+        out.append(f"   threads: unresolved={len(unresolved)} (outdated={sum(t['isOutdated'] for t in unresolved)})"
+                   f" resolved={seen_t - len(unresolved)}" + (f" (last {seen_t} of {th['totalCount']})" if th["totalCount"] > seen_t else ""))
+    issues = n["closingIssuesReferences"]["nodes"]
+    if issues:
+        own = n["repository"]["nameWithOwner"]
+        out.append("   closes: " + ",".join(
+            (f"#{i['number']}" if i["repository"]["nameWithOwner"] == own else f"{i['repository']['nameWithOwner']}#{i['number']}")
+            + ("" if i["state"] == "OPEN" else f"({i['state'].lower()})") for i in issues))
+    for cm in [c for c in n["comments"]["nodes"] if not is_bot(c["author"])][-args.comments:] if args.comments else []:
+        out.append(f"   comment {login(cm['author'])} {cm['createdAt'][:10]}: {one_line(cm['body'], 120)}")
+    if args.body:
+        body = bump_body(n.get("body")) if is_bot(n["author"]) else n.get("body")
+        out.append(f"   body: {one_line(body, args.body)}")
+
+
+def merge_methods(nodes):
+    repos = {}
+    for n in nodes:
+        r = n["repository"]
+        repos[r["nameWithOwner"]] = ",".join(m for m, ok in (
+            ("squash", r["squashMergeAllowed"]), ("merge", r["mergeCommitAllowed"]),
+            ("rebase", r["rebaseMergeAllowed"])) if ok)
+    return [f"repo {k} merge_methods={v}" for k, v in sorted(repos.items())]
+
+
+def repo_stats(api, args):
+    base = " ".join(["is:pr"] + [f"repo:{r}" for r in args.repos] + ([f"author:{args.author}"] if args.author else []))
+    d7, d30, d90 = (str(date.today() - timedelta(days=x)) for x in (7, 30, 90))
+    q = {
+        "open": "is:open", "draft": "is:open draft:true",
+        "review_none": "is:open draft:false review:none", "review_required": "is:open draft:false review:required",
+        "approved": "is:open draft:false review:approved", "changes_requested": "is:open draft:false review:changes_requested",
+        "ci_failing": "is:open status:failure", "ci_pending": "is:open status:pending",
+        "idle_30d": f"is:open updated:<{d30}", "idle_90d": f"is:open updated:<{d90}",
+        "opened_7d": f"created:>={d7}", "opened_30d": f"created:>={d30}",
+        "merged_7d": f"is:merged merged:>={d7}", "merged_30d": f"is:merged merged:>={d30}",
+        "closed_unmerged_30d": f"is:closed is:unmerged closed:>={d30}",
+    }
+    c = api.counts({k: f"{base} {v}" for k, v in q.items()})
+    return [
+        f"stats scope: {base} (repo/author only; --since/--state/--no-draft not applied; review counts exclude drafts)",
+        f"stats open={c['open']} draft={c['draft']} approved={c['approved']} changes_requested={c['changes_requested']}"
+        f" review_required={c['review_required']} no_review_yet={c['review_none']}",
+        f"stats ci_failing={c['ci_failing']} ci_pending={c['ci_pending']} idle_over_30d={c['idle_30d']} (of which over_90d={c['idle_90d']})",
+        f"stats last_7d: opened={c['opened_7d']} merged={c['merged_7d']}"
+        f" | last_30d: opened={c['opened_30d']} merged={c['merged_30d']} closed_unmerged={c['closed_unmerged_30d']}"
+        f" net_backlog={c['opened_30d'] - c['merged_30d'] - c['closed_unmerged_30d']:+d}",
+    ]
+
+
+def fetched_stats(items):
+    if not items:
+        return []
+    out = []
+    merged = sorted((ts(n["mergedAt"]) - ts(n["createdAt"])).total_seconds() / 86400 for n, _ in items if n["mergedAt"])
+    if merged:
+        pct = lambda p: merged[min(len(merged) - 1, int(p * len(merged)))]
+        out.append(f"fetched time_to_merge: n={len(merged)} median={pct(0.5):.1f}d p90={pct(0.9):.1f}d max={merged[-1]:.1f}d")
+    items = [(n, a) for n, a in items if n["state"] == "OPEN"]
+    if not items:
+        return out
+    turns = Counter(a["turn"] for _, a in items)
+    out.append("fetched turn: " + " ".join(f"{k}={v}" for k, v in turns.most_common()))
+    buckets = Counter()
+    for _, a in items:
+        w = a["waiting_days"] or 0
+        buckets["<7d" if w < 7 else "7-30d" if w < 30 else "30-90d" if w < 90 else ">90d"] += 1
+    out.append("fetched waiting: " + " ".join(f"{k}={buckets[k]}" for k in ("<7d", "7-30d", "30-90d", ">90d")))
+    fails = Counter(f for _, a in items for f in set(a["failed"]))
+    common = [(k, v) for k, v in fails.most_common(8) if v >= 2]
+    if common:
+        out.append("fetched checks failing on >=2 PRs (flaky/infra suspects): " + ", ".join(f"{k}={v}" for k, v in common))
+    authors = Counter(a["author"] for _, a in items)
+    out.append("fetched top authors: " + ", ".join(f"{k}={v}" for k, v in authors.most_common(5)))
+    revs = Counter(r for _, a in items for st in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED") for r in a["reviews"][st]
+                   if r not in BOT_LOGINS)
+    if revs:
+        out.append("fetched top reviewers: " + ", ".join(f"{k}={v}" for k, v in revs.most_common(5)))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Modes
+# ---------------------------------------------------------------------------
+
+def run_default(api, args, now):
+    q = build_query(args)
+    total, nodes = api.search(q, args.limit, args.body > 0, args.comments) if args.limit else (None, [])
+    api.enrich(nodes)
+    items = [(n, analyze(n, now)) for n in nodes]
+    return q, total, items
+
+
+def run_mine(api, args, now):
+    """PRs where it's my turn: review requested (direct or team), re-review after author update, or my PRs needing action.
+    One advanced OR search for candidates + one light url-only search to tell which have my review requested."""
+    scope = []
+    if args.repos:  # advanced search ANDs repeated qualifiers: group repos with OR
+        scope.append("(" + " OR ".join(f"repo:{r}" for r in args.repos) + ")")
+    if args.since:
+        scope.append(f"created:>={args.since}")
+    if args.no_draft:
+        scope.append("draft:false")
+    q = " ".join(["is:pr is:open (review-requested:@me OR reviewed-by:@me OR author:@me)"] + scope + ["sort:updated-asc"])
+    total, nodes = api.search(q, args.limit, args.body > 0, args.comments, advanced=True)
+    rq = " ".join(["is:pr is:open review-requested:@me"] + [f"repo:{r}" for r in args.repos] + scope[1 if args.repos else 0:])
+    n_req, requested = api.urls(rq, SEARCH_CAP)
+    missing = requested - {n["url"] for n in nodes}
+    if missing:  # candidates truncated by --limit: always include every PR requesting my review
+        _, extra = api.search(rq + " sort:updated-asc", SEARCH_CAP, args.body > 0, args.comments)
+        nodes += [n for n in extra if n["url"] in missing]
+    api.enrich(nodes)
+    me, items = api.viewer, []
+    for n in nodes:
+        a = analyze(n, now)
+        my_review = max((ts(r["submittedAt"]) for r in n["latestReviews"]["nodes"] if login(r["author"]) == me), default=None)
+        if a["author"] == me:
+            if a["turn"] not in ("author", "merge"):  # merge: my approved PR, I merge it
+                continue
+            a["mine"] = "author"
+        else:
+            if a["turn"] not in ("reviewers", "merge", "maintainers"):  # maintainers: stuck bot PR, I'm requested
+                continue
+            if n["url"] in requested:
+                a["mine"] = "review_requested"
+                if my_review is None or my_review < a["last_author"]:
+                    a["since"] = max(filter(None, [a["last_author"], my_review]))
+            elif my_review and my_review < a["last_author"] and a["turn"] == "reviewers":
+                a["mine"], a["why"], a["since"] = "re-review", "updated_since_my_review", a["last_author"]
+            else:
+                continue
+            a["waiting_days"] = days(a["since"], now)
+        items.append((n, a))
+    trunc = f"(truncated to {len(nodes)}, raise --limit)" if len(nodes) < total else ""
+    return q, f"candidates={total}{trunc} review_requested={n_req}", items
+
+
+def cmd_status(argv):
+    ap = argparse.ArgumentParser(
+        prog="gh-activity status",
+        description="Current PR status: CI, merge, reviews, whose turn and how long (compact text for AI agents).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  gh-activity status projectcontour/contour
+  gh-activity status --author=app/dependabot projectcontour/contour tsaarni/certyaml
+  gh-activity status --mine                                   # waiting on me, all repos
+  gh-activity status --mine projectcontour/contour            # waiting on me, one repo
+  gh-activity status --stats --limit=0 keycloak/keycloak      # repo counts only
+  gh-activity status --stats --limit=50 --sort=waiting keycloak/keycloak
+  gh-activity status --body=3000 --author=app/dependabot tsaarni/echoserver
+
+turn: author | reviewers | merge (approved/ready, maintainers to merge) | maintainers (bot PR stuck) | ci (running)
+waiting: days since the turn started (last author push/comment, last review/comment by others, approval)
+""")
+    ap.add_argument("repos", nargs="*", metavar="owner/repo")
+    ap.add_argument("--mine", action="store_true", help="only PRs where it's my turn (review requested, re-review, or my PR needs action)")
+    ap.add_argument("--stats", action="store_true", help="repo-level counts + stats over fetched PRs")
+    ap.add_argument("--author", help="PR author: login, @me, or app/<name> (e.g. app/dependabot). default: any")
+    ap.add_argument("--state", choices=["open", "closed", "merged", "all"], default="open", help="default: open")
+    ap.add_argument("--since", type=parse_since, help="YYYY-MM-DD or Nd: created on/after (merged/closed on/after with --state=merged|closed)")
+    ap.add_argument("--no-draft", action="store_true", help="exclude draft PRs")
+    ap.add_argument("--limit", type=int, help=f"max PRs to fetch (default 30, --mine 100; max {SEARCH_CAP}; 0 = none)")
+    ap.add_argument("--sort", choices=["repo", "age", "waiting"], help="repo, age (oldest first), waiting (longest first). default: repo, --mine: waiting")
+    ap.add_argument("--comments", type=int, default=3, help="last N comments per PR (default 3)")
+    ap.add_argument("--body", type=int, default=0, metavar="N", help="include first N chars of PR body (release notes etc.), default 0 = off")
+    ap.add_argument("--top", type=int, metavar="N", help="show only first N PRs after sorting (fetch stays --limit; use for 'top N')")
+    args = ap.parse_args(argv)
+    for r in args.repos:
+        if not REPO_RE.fullmatch(r):
+            ap.error(f"invalid repo {r!r}, expected owner/repo")
+    if not args.repos and not args.mine and not args.author:
+        ap.error("give owner/repo(s), --author, or --mine")
+    if args.stats and not args.repos and not args.author:
+        ap.error("--stats needs owner/repo(s) or --author")
+    if args.mine and args.author:
+        ap.error("--mine and --author are exclusive")
+    if args.limit is None:
+        args.limit = 100 if args.mine else 30
+    args.limit = max(0, min(args.limit, SEARCH_CAP))
+    if args.mine and args.state != "open":
+        ap.error("--mine works on open PRs only")
+    if args.mine and not args.limit:
+        ap.error("--mine needs --limit >= 1")
+    args.sort = args.sort or ("waiting" if args.mine else "repo")
+
+    now = datetime.now(timezone.utc)
+    api = Api()
+    out = []
+    if args.mine:
+        q, total, items = run_mine(api, args, now)
+        out.append(f"query: {q}")
+        out.append(f"me={api.viewer} {total} -> my_turn={len(items)}")
+    else:
+        q, total, items = run_default(api, args, now)
+        if args.limit:
+            out.append(f"query: {q}")
+            out.append(f"me={api.viewer} matched={total} shown={len(items)}" + (" (truncated, raise --limit or narrow query)" if len(items) < total else ""))
+            if total > SEARCH_CAP:
+                out.append(f"warning: search caps at {SEARCH_CAP} results; narrow with --since/--author")
+    if args.stats:
+        out += repo_stats(api, args) + fetched_stats(items)
+    out.append(f"api_cost={api.cost} remaining={api.remaining}")
+    out += merge_methods([n for n, _ in items])
+
+    key = {
+        "age": lambda x: x[0]["createdAt"],
+        "repo": lambda x: (x[0]["repository"]["nameWithOwner"], x[0]["number"]),
+        "waiting": lambda x: -(x[1]["waiting_days"] or 0),
+    }[args.sort]
+    ranked = sorted(items, key=key)
+    if args.top and len(ranked) > args.top:
+        out.append(f"top={args.top} of {len(ranked)} (sorted by {args.sort})")
+        ranked = ranked[:args.top]
+    for i, (n, a) in enumerate(ranked, 1):
+        render_pr(i, n, a, args, now, out)
+    print("\n".join(out))
+
+
+# ---------------------------------------------------------------------------
+# history: contributions of a user over a period (PRs + issues, role-tagged)
+# ---------------------------------------------------------------------------
+
+REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
+
+HISTORY_QUERY = """
+query($q: String!, $first: Int!, $after: String, $user: String!, $acts: Boolean!) {
+  rateLimit { cost remaining }
+  viewer { login }
+  search(query: $q, type: ISSUE_ADVANCED, first: $first, after: $after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { __typename
+      ... on PullRequest { url number title state createdAt closedAt mergedAt
+        author { __typename login } labels(first: 10) { nodes { name } } comments { totalCount }
+        repository { nameWithOwner } reviews(author: $user, first: 0) { totalCount }
+        myReviews: reviews(author: $user, last: 5) @include(if: $acts) { nodes { submittedAt } }
+        lastComments: comments(last: 30) @include(if: $acts) { nodes { author { login } createdAt } } }
+      ... on Issue { url number title state createdAt closedAt
+        author { __typename login } labels(first: 10) { nodes { name } } comments { totalCount }
+        repository { nameWithOwner }
+        lastComments: comments(last: 30) @include(if: $acts) { nodes { author { login } createdAt } } }
+    }
+  }
+}
+"""
+
+
+def parse_period(value):
+    """-> (since, until|None) as YYYY-MM-DD. Formats: A..B, A.., YYYY, YYYY-MM, [YYYY-]qN, last-N-days, Nd, YYYY-MM-DD."""
+    today = date.today()
+    if ".." in value:
+        a, b = value.split("..", 1)
+        return a, (b or None)
+    m = re.fullmatch(r"(?:(\d{4})-)?[qQ]([1-4])", value)
+    if m:
+        y, q = int(m.group(1) or today.year), int(m.group(2))
+        start = date(y, 3 * q - 2, 1)
+        end = date(y + (q == 4), 1 if q == 4 else 3 * q + 1, 1) - timedelta(days=1)
+        return str(start), str(end)
+    if re.fullmatch(r"\d{4}", value):
+        return f"{value}-01-01", f"{value}-12-31"
+    m = re.fullmatch(r"(\d{4})-(\d{2})", value)
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2))
+        end = date(y + (mo == 12), 1 if mo == 12 else mo + 1, 1) - timedelta(days=1)
+        return f"{value}-01", str(end)
+    m = re.fullmatch(r"last-(\d+)-days|(\d+)d", value)
+    if m:
+        return str(today - timedelta(days=int(m.group(1) or m.group(2)))), None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return value, None
+    raise argparse.ArgumentTypeError(f"invalid period {value!r}")
+
+
+def split_ranges(api, base, since, until, field="created"):
+    """Split [since, until] until each sub-range matches <= SEARCH_CAP items (search hard cap)."""
+    d0, d1 = date.fromisoformat(since), date.fromisoformat(until)
+    stack, out = [(d0, d1)], []
+    while stack:
+        a, b = stack.pop()
+        q = f"{base} {field}:{a}..{b}"
+        c = api.counts({"c": q}, advanced=True)["c"]
+        if c > SEARCH_CAP and a < b:
+            mid = a + (b - a) // 2
+            stack += [(mid + timedelta(days=1), b), (a, mid)]
+        else:
+            out.append((q, c))
+    return out
+
+
+def cmd_history(argv):
+    ap = argparse.ArgumentParser(
+        prog="gh-activity history",
+        description="User's GitHub contributions over a period: PRs and issues authored, PRs reviewed, items commented.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""period: A..B | A.. | YYYY | YYYY-MM | [YYYY-]q1..q4 | last-N-days | Nd | YYYY-MM-DD
+role: author > reviewer > commented (highest applies). Bot-authored non-own items hidden unless --include-bots.
+examples:
+  gh-activity history                                   # @me, last 365 days
+  gh-activity history --period=q3 projectcontour/contour
+  gh-activity history --author=<login> --period=2026-09
+""")
+    ap.add_argument("repos", nargs="*", metavar="owner/repo")
+    ap.add_argument("--author", default="@me", help="GitHub user (default @me)")
+    ap.add_argument("--period", default="last-365-days", help="default last-365-days")
+    ap.add_argument("--type", choices=["all", "pr", "issue"], default="all")
+    ap.add_argument("--date", choices=["created", "activity"], default="created",
+                    help="created (default): items created in period. activity: items where the user authored, reviewed "
+                         "or commented within the period, incl. older items (last 30 comments / 5 reviews checked)")
+    ap.add_argument("--role", choices=["all", "author", "reviewer", "commented"], default="all")
+    ap.add_argument("--include-bots", action="store_true", help="include bot-authored items the user only reviewed/commented")
+    ap.add_argument("--limit", type=int, default=3000, help="max items (default 3000)")
+    args = ap.parse_args(argv)
+    for r in args.repos:
+        if not REPO_RE.fullmatch(r):
+            ap.error(f"invalid repo {r!r}, expected owner/repo")
+    try:
+        since, until = parse_period(args.period)
+    except argparse.ArgumentTypeError as e:
+        ap.error(str(e))
+    until = until or str(date.today())
+
+    api = Api()
+    user = args.author
+    if user == "@me":
+        user = gh_graphql("query { viewer { login } }")["viewer"]["login"]
+    roles = {"author": [f"author:{user}"], "reviewer": [f"reviewed-by:{user}"], "commented": [f"commenter:{user}"]}
+    who = roles[args.role] if args.role != "all" else [x for v in roles.values() for x in v]
+    base = ["(" + " OR ".join(who) + ")"]
+    if args.type != "all":
+        base.append(f"is:{args.type}")
+    if args.repos:
+        base.append("(" + " OR ".join(f"repo:{r}" for r in args.repos) + ")")
+    base = " ".join(base)
+
+    ranges = split_ranges(api, base, since, until, "updated" if args.date == "activity" else "created")
+    nodes = []
+    for q, c in sorted(ranges):
+        after = None
+        while c and len(nodes) < args.limit:
+            d = gh_graphql(HISTORY_QUERY, {"q": q, "first": 50 if args.date == "activity" else 100, "after": after,
+                                           "user": user, "acts": args.date == "activity"})
+            api._account(d)
+            nodes += [n for n in d["search"]["nodes"] if n and n.get("url")]
+            if not d["search"]["pageInfo"]["hasNextPage"]:
+                break
+            after = d["search"]["pageInfo"]["endCursor"]
+
+    ul = user.lower()
+    lo, hi = datetime.fromisoformat(since + "T00:00:00+00:00"), datetime.fromisoformat(until + "T23:59:59+00:00")
+    items, bots, outside = [], 0, 0
+    for n in {n["url"]: n for n in nodes}.values():
+        if args.date == "activity":
+            acts = [ts(n["createdAt"])] if login(n["author"]).lower() == ul else []
+            acts += [ts(r["submittedAt"]) for r in (n.get("myReviews") or {}).get("nodes", []) if r["submittedAt"]]
+            acts += [ts(c["createdAt"]) for c in n["lastComments"]["nodes"] if login(c["author"]).lower() == ul]
+            acts = [t for t in acts if lo <= t <= hi]
+            if not acts:
+                outside += 1  # updated in period, but not by the user
+                continue
+            n["_acted"] = max(acts)
+        kind = "pr" if n["__typename"] == "PullRequest" else "issue"
+        if login(n["author"]).lower() == ul:
+            role = "author"
+        elif kind == "pr" and n["reviews"]["totalCount"]:
+            role = "reviewer"
+        else:
+            role = "commented"
+        if args.role != "all" and role != args.role:
+            continue
+        if role != "author" and is_bot(n["author"]) and not args.include_bots:
+            bots += 1
+            continue
+        items.append((n, kind, role))
+
+    total = sum(c for _, c in ranges)
+    out = [f"query: {base} {'updated' if args.date == 'activity' else 'created'}:{since}..{until}"
+           + (" + user's own action in period" if args.date == "activity" else ""),
+           f"user={user} matched={total} shown={len(items)}" + (f" ranges={len(ranges)}" if len(ranges) > 1 else "")
+           + (" (truncated, raise --limit)" if len(nodes) < total else "") + f" bots_hidden={bots}"
+           + (f" updated_by_others_only={outside}" if args.date == "activity" else ""),
+           f"api_cost={api.cost} remaining={api.remaining}"]
+    rc = Counter(r for _, _, r in items)
+    tc = Counter(k for _, k, _ in items)
+    sc = Counter(n["state"].lower() for n, _, _ in items)
+    out.append(f"totals: authored={rc['author']} reviewed={rc['reviewer']} commented={rc['commented']}"
+               f" | pr={tc['pr']} issue={tc['issue']} | open={sc['open']} merged={sc['merged']} closed={sc['closed']}")
+    by_repo = {}
+    for it in items:
+        by_repo.setdefault(it[0]["repository"]["nameWithOwner"], []).append(it)
+    repos = sorted(by_repo, key=lambda r: (-len(by_repo[r]), r))
+    out.append("focus:")
+    for r in repos:
+        c = Counter(x[2] for x in by_repo[r])
+        out.append(f"  {r} {len(by_repo[r])} ({round(100 * len(by_repo[r]) / max(1, len(items)))}%)"
+                   f" authored={c['author']} reviewed={c['reviewer']} commented={c['commented']}")
+    order = {"author": 0, "reviewer": 1, "commented": 2}
+    for r in repos:
+        out.append("")
+        out.append(f"## {r} ({len(by_repo[r])})")
+        for n, kind, role in sorted(by_repo[r], key=lambda x: (order[x[2]], x[1] != "pr", x[0]["createdAt"])):
+            labels = [l["name"] for l in n["labels"]["nodes"]]
+            out.append(f"- {role}:{kind}:{n['state'].lower()} #{n['number']} {n['createdAt'][:10]}"
+                       + (f" acted={n['_acted']:%Y-%m-%d}" if "_acted" in n else "") + f" c={n['comments']['totalCount']}"
+                       + (f" by={login(n['author'])}" if role != "author" else "")
+                       + f" {n['title']}" + (f" [{','.join(labels)}]" if labels else "") + f" {n['url']}")
+    print("\n".join(out))
+
+
+# ---------------------------------------------------------------------------
+# inspect: rich details of specific PRs/issues (one batched GraphQL call)
+# ---------------------------------------------------------------------------
+
+INSPECT_FIELDS = """
+  __typename
+  ... on PullRequest { url number title state createdAt mergedAt closedAt isDraft baseRefName
+    author { login } labels(first: 20) { nodes { name } } body additions deletions
+    closingIssuesReferences(first: 10) { nodes { number repository { nameWithOwner } } }
+    files(first: 100) { totalCount nodes { path additions deletions } }
+    reviews(author: $user, last: 30) { nodes { author { login } state submittedAt body
+      comments(first: 30) { nodes { path body } } } }
+    comments(last: 50) { totalCount nodes { author { __typename login } createdAt body } }
+    timelineItems(itemTypes: [CROSS_REFERENCED_EVENT], last: 20) { nodes { ... on CrossReferencedEvent { willCloseTarget
+      source { __typename ... on PullRequest { number title state repository { nameWithOwner } }
+                         ... on Issue { number title state repository { nameWithOwner } } } } } } }
+  ... on Issue { url number title state createdAt closedAt
+    author { login } labels(first: 20) { nodes { name } } body
+    comments(last: 50) { totalCount nodes { author { __typename login } createdAt body } }
+    timelineItems(itemTypes: [CROSS_REFERENCED_EVENT], last: 20) { nodes { ... on CrossReferencedEvent { willCloseTarget
+      source { __typename ... on PullRequest { number title state repository { nameWithOwner } }
+                         ... on Issue { number title state repository { nameWithOwner } } } } } } }
+"""
+
+
+def parse_ref(ref):
+    ref = ref.strip()
+    m = re.fullmatch(r"https?://github\.com/([^/]+)/([^/]+)/(?:pull|issues)/(\d+)\S*", ref) or \
+        re.fullmatch(r"([^/\s]+)/([^/#\s]+)#(\d+)", ref)
+    return (m.group(1), m.group(2), int(m.group(3))) if m else None
+
+
+def cmd_inspect(argv):
+    ap = argparse.ArgumentParser(
+        prog="gh-activity inspect",
+        description="Details of specific PRs/issues: body, files, linked issues, reviews, review comments, comments.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""refs: https://github.com/o/r/pull/N | https://github.com/o/r/issues/N | o/r#N (or one per line on stdin)
+--author=@me (default) keeps only that user's reviews/comments; --author=any shows everyone's.
+examples:
+  gh-activity inspect keycloak/keycloak#34826 --author=any
+  gh-activity inspect --max-body=0 https://github.com/projectcontour/contour/pull/7803
+""")
+    ap.add_argument("refs", nargs="*")
+    ap.add_argument("--author", default="@me", help="user whose reviews/comments to show: login, @me, any")
+    ap.add_argument("--max-body", type=int, default=500, help="max chars per body/comment, 0 = unlimited (default 500)")
+    args = ap.parse_args(argv)
+    refs = args.refs or ([l for l in sys.stdin if l.strip()] if not sys.stdin.isatty() else [])
+    parsed = [p for p in (parse_ref(r) for r in refs) if p]
+    for r in refs:
+        if not parse_ref(r):
+            print(f"warning: unrecognized ref {r.strip()!r}", file=sys.stderr)
+    if not parsed:
+        ap.error("give PR/issue refs")
+    api = Api()
+    user = args.author
+    if user == "@me":
+        user = gh_graphql("query { viewer { login } }")["viewer"]["login"]
+    user_var = None if user == "any" else user
+    cut = (lambda t: one_line(t, args.max_body)) if args.max_body else (lambda t: re.sub(r"\s+", " ", t or "").strip())
+    now = datetime.now(timezone.utc)
+    out = []
+    for i in range(0, len(parsed), DETAIL_BATCH):
+        batch = parsed[i:i + DETAIL_BATCH]
+        parts = [f'i{k}: repository(owner: {json.dumps(o)}, name: {json.dumps(r)}) {{ issueOrPullRequest(number: {n}) {{ {INSPECT_FIELDS} }} }}'
+                 for k, (o, r, n) in enumerate(batch)]
+        q = "query($user: String) { rateLimit { cost remaining } %s }" % "\n".join(parts)
+        cmd = ["gh", "api", "graphql", "-f", f"query={q}"] + (["-f", f"user={user_var}"] if user_var else [])
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        data = json.loads(p.stdout or "{}")
+        if not data.get("data"):
+            sys.exit(f"error: gh api graphql failed: {p.stderr.strip() or data.get('errors')}")
+        api.cost += data["data"]["rateLimit"]["cost"]
+        api.remaining = data["data"]["rateLimit"]["remaining"]
+        for k, (o, r, n) in enumerate(batch):
+            x = (data["data"].get(f"i{k}") or {}).get("issueOrPullRequest")
+            if not x:
+                out += ["", f"{o}/{r}#{n}: not found or no access"]
+                continue
+            kind = "pr" if x["__typename"] == "PullRequest" else "issue"
+            state = x["state"].lower() + (" draft" if x.get("isDraft") else "")
+            done = x.get("mergedAt") or x.get("closedAt")
+            out += ["", f"{x['url']} {kind} {state} author={login(x['author'])} age={days(ts(x['createdAt']), now)}d"
+                    + (f" base={x['baseRefName']}" if kind == "pr" else "") + (f" done={done[:10]}" if done else "")]
+            out.append(f"   title: {x['title']}")
+            labels = [l["name"] for l in x["labels"]["nodes"]]
+            if labels:
+                out.append(f"   labels: {','.join(labels)}")
+            if kind == "pr":
+                closes = [(f"#{c['number']}" if c["repository"]["nameWithOwner"] == f"{o}/{r}" else f"{c['repository']['nameWithOwner']}#{c['number']}")
+                          for c in x["closingIssuesReferences"]["nodes"]]
+                if closes:
+                    out.append(f"   closes: {','.join(closes)}")
+                f = x["files"]
+                more = f["totalCount"] - len(f["nodes"])
+                out.append(f"   files({f['totalCount']}) +{x['additions']}/-{x['deletions']}: "
+                           + ",".join(f"{y['path']}(+{y['additions']}/-{y['deletions']})" for y in f["nodes"][:20])
+                           + (f",…+{f['totalCount'] - 20}" if f["totalCount"] > 20 else ""))
+            refs = []
+            for ev in x["timelineItems"]["nodes"]:
+                src = (ev or {}).get("source") or {}
+                if not src.get("number"):
+                    continue
+                rn = src["repository"]["nameWithOwner"]
+                tag = ("pr" if src["__typename"] == "PullRequest" else "issue") + f":{src['state'].lower()}" + (" closes-this" if ev.get("willCloseTarget") else "")
+                refs.append(f"{'' if rn == f'{o}/{r}' else rn}#{src['number']}({tag}) {one_line(src['title'], 60)}")
+            if refs:
+                out.append(f"   referenced_by: {' | '.join(dict.fromkeys(refs))}")
+            if x.get("body"):
+                out.append(f"   body: {cut(x['body'])}")
+            if kind == "pr":
+                for rv in x["reviews"]["nodes"]:
+                    out.append(f"   review {login(rv['author'])} {rv['state']} {rv['submittedAt'][:10]}" + (f": {cut(rv['body'])}" if rv["body"] else ""))
+                    for rc in rv["comments"]["nodes"]:
+                        out.append(f"     inline {rc['path']}: {cut(rc['body'])}")
+            cms = [c for c in x["comments"]["nodes"] if user_var is None or login(c["author"]).lower() == user_var.lower()]
+            out.append(f"   comments: total={x['comments']['totalCount']}" + ("" if user_var is None else f" by_{user_var}={len(cms)} (in last 50)"))
+            for c in cms:
+                out.append(f"   comment {login(c['author'])} {c['createdAt'][:10]}: {cut(c['body'])}")
+    print(f"me={api.viewer or user} api_cost={api.cost} remaining={api.remaining}" + "\n".join(out))
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+USAGE = """usage: gh-activity <command> [options]   (compact text for AI agents; requires authenticated gh)
+
+commands:
+  status    current PR status: CI, conflicts, reviews, threads, whose turn + waiting; --mine; --stats
+  history   user's contributions over a period: PRs/issues authored, PRs reviewed, items commented
+  inspect   details of specific PRs/issues: body, files, reviews, inline comments, comments
+
+gh-activity <command> --help for options
+"""
+
+
+def main():
+    cmds = {"status": cmd_status, "history": cmd_history, "inspect": cmd_inspect}
+    if len(sys.argv) < 2 or sys.argv[1] not in cmds:
+        print(USAGE, file=sys.stderr if len(sys.argv) >= 2 and sys.argv[1] not in ("-h", "--help") else sys.stdout)
+        sys.exit(0 if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help") else 2)
+    cmds[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()
