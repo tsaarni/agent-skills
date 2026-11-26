@@ -21,3 +21,7 @@ for f in "$repo"/prompts/*.md; do
     sed '1s/^---$/---\ndisable-model-invocation: true/' "$f" > "$commands/$(basename "$f")"
 done
 echo "Converted prompts -> $commands/"
+
+# Global always-on rules (uncomment to enable; or add @path import inside ~/.claude/CLAUDE.md):
+# ln -sfn "$repo/rules/global-tools.md" ~/.claude/CLAUDE.md
+# echo "Linked global rules -> ~/.claude/CLAUDE.md"

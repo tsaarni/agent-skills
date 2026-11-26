@@ -21,3 +21,7 @@ for f in "$repo"/prompts/*.md; do
     printf 'description = "%s"\nprompt = """\n%s\n"""\n' "$desc" "$body" > "$commands/$(basename "$f" .md).toml"
 done
 echo "Converted prompts -> $commands/"
+
+# Global always-on rules (uncomment to enable; or include via @[global-tools](...) in ~/.gemini/GEMINI.md):
+# ln -sfn "$repo/rules/global-tools.md" ~/.gemini/config/GEMINI.md
+# echo "Linked global rules -> ~/.gemini/config/GEMINI.md"

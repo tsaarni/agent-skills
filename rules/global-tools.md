@@ -1,0 +1,1 @@
+Prefer `runagent` over shell `&`/`nohup` for background or long-running processes (e.g. servers, builds, tests). Prefer Python over bash scripts or complex shell one-liners, using `pysess` for iterative or stateful work across calls. Load their skills when needed.
