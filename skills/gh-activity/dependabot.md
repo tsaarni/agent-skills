@@ -17,7 +17,9 @@ Private list, not in this repo: section A of `~/storage/memory/tasks/MaintainDep
 
 ## List (start of session / "list" / "refresh")
 1. `G status --author=app/dependabot --body=1500 <repos from list A...>` (~3–8 API pts). Header `matched` must = `shown` (else `--limit`).
-2. Analyze body: what changes for us, breaking changes, security fix, multi-version jump; grouped PR → risky members; big go.mod/lock diff → `gh pr diff N -R R`.
+2. Analyze body + files: what changes for us, breaking changes, security fix, multi-version jump; grouped PR → risky members.
+   - Files ≠ manifests/lockfiles of that ecosystem (or ≠ `uses:` ref for actions) → `gh pr diff N -R R`, Needs work `⚠️ unexpected files: <list>`.
+   - Big lockfile/go.sum diff or new `require` → `gh pr diff N -R R`, name notable pulled deps (`+ pulls X`); `go`/`toolchain` raised → ⚠️ high risk.
 3. Present grouped (format below) + **Suggested:** order.
 
 ```
@@ -29,13 +31,13 @@ Private list, not in this repo: section A of `~/storage/memory/tasks/MaintainDep
 3. **<dep>** … · <risk reason> · [<repo>#<num>](<url>) · <age>d · ❌ <failed checks> → <proposed action>
 **Suggested:** <e.g. merge 1–7 (contour one at a time) → retry 8 → diagnose 9>
 ```
-- Ready = CI ✅ + no conflicts + not high risk (`turn=merge` or `turn=reviewers reason=awaiting_review`). Stuck = `conflicts(bot_pr)`. Needs work = `ci_failed*`, ⚠️ high risk (breaking changes, multi-version jump, core dep: Envoy/Go toolchain/k8s/Gateway API). CI running = `turn=ci`. Omit empty groups. Group by `reason=`, not `turn=`: `turn=maintainers` with me in `requested=` (stuck bot PR) → Stuck if `conflicts(bot_pr)`, Needs work if `ci_failed(bot_pr)`.
+- Ready = CI ✅ + no conflicts + not high risk (`turn=merge` or `turn=reviewers reason=awaiting_review`). Stuck = `conflicts(bot_pr)`. Needs work = `ci_failed*`, ⚠️ unexpected files, ⚠️ high risk (breaking changes, multi-version jump, core dep: Envoy/Go toolchain/k8s/Gateway API). CI running = `turn=ci`. Omit empty groups. Group by `reason=`, not `turn=`: `turn=maintainers` with me in `requested=` (stuck bot PR) → Stuck if `conflicts(bot_pr)`, Needs work if `ci_failed(bot_pr)`.
 - `policy=label_missing` alone ≠ failure (still Ready). PR as markdown link `[<repo>#<num>](<url>)`, `<repo>` short name when unambiguous. Markers only when relevant (🔒 ⚠️ ❌). Note on line only if it differs from group meaning.
 
 ## "merge N" (per PR, in order given)
 1. Re-check fresh: `G status --author=app/dependabot <repo>` (that repo only). Ready only if ALL:
    - PR still open, not draft; `ci=SUCCESS` (no failed/pending; label-only policy ok); `mergeable=MERGEABLE`; `merge_state` CLEAN or BLOCKED-by-review only;
-   - head unchanged since listed (`last_commit` same) — else re-analyze body, tell user what changed, ask again.
+   - head unchanged since listed (`last_commit` same, same `files`) — else re-analyze body + files, tell user what changed, ask again.
    - `mergeable=UNKNOWN` → wait few s, recheck once. `BEHIND` (base moved, up-to-date required) → offer `@dependabot rebase`, don't merge.
    - Not ready → stop, report why (1 line), propose action.
 2. PR in ⚠️ group → confirm once ("#N is high risk: <reason>. Merge anyway?"), proceed only on yes.
