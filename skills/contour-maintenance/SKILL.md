@@ -288,7 +288,7 @@ CONTINUE only if extraction succeeds.
 
 MUST execute exactly:
 ```bash
-printf "GoVersionOverride = \"%s\"\n" "$GO_VERSION" > osv-scanner.toml
+printf 'ScanGoModVersion = true\nGoVersionOverride = "%s"\n' "$GO_VERSION" > osv-scanner.toml
 ```
 
 THEN verify:
@@ -296,7 +296,7 @@ THEN verify:
 cat osv-scanner.toml
 ```
 
-Expected: Single line containing `GoVersionOverride = "X.Y.Z"`
+Expected: two lines, `ScanGoModVersion = true` and `GoVersionOverride = "X.Y.Z"`. Without `ScanGoModVersion`, osv-scanner does not scan the Go standard library from `go.mod` and the override has no effect.
 
 ### Step 4: Execute Vulnerability Scan (NON-REVOCABLE)
 
