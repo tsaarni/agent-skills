@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -350,6 +352,9 @@ func fillV3Call(tc *ToolCall, p *v3Payload) {
 		tc.Kind = KindWrite
 	case "search":
 		tc.Kind = KindSearch
+	case "":
+		// Some clients (ACP) log the kind only on the result; go by name.
+		tc.Kind = v3KindByName(p.ToolName, args)
 	default:
 		a := strings.ToLower(p.ActionType + " " + p.ToolName)
 		switch {
@@ -385,6 +390,8 @@ func fillV3Call(tc *ToolCall, p *v3Payload) {
 				tc.Paths = append(tc.Paths, v)
 			}
 		}
+	default:
+		tc.Args = argSummary(args)
 	}
 
 	switch p.Status {
@@ -399,6 +406,51 @@ func fillV3Call(tc *ToolCall, p *v3Payload) {
 			tc.Status = statusPending
 		}
 	}
+}
+
+// v3KindByName classifies a tool call whose event carries no kind.
+func v3KindByName(name string, args map[string]json.RawMessage) string {
+	switch name {
+	case "execute_bash", "shell", "execute_cmd":
+		return KindShell
+	case "read_file", "read", "fs_read":
+		return KindRead
+	case "fs_write", "fs_append", "str_replace", "delete_file", "write":
+		return KindWrite
+	case "grep_search", "file_search", "list_directory", "code", "grep", "glob":
+		return KindSearch
+	}
+	switch {
+	case strings.HasPrefix(name, "subagent"):
+		return KindSubagent
+	case strings.HasPrefix(name, "mcp_") || args["tool_id"] != nil:
+		return KindMCP
+	}
+	return KindOther
+}
+
+// argSummary renders tool arguments as "key=value" pairs in key order, for
+// display. String values are written as-is, others as compact JSON.
+func argSummary(args map[string]json.RawMessage) string {
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		v := argString(args, k)
+		if v == "" {
+			var buf bytes.Buffer
+			if json.Compact(&buf, args[k]) == nil {
+				v = buf.String()
+			} else {
+				v = string(args[k])
+			}
+		}
+		parts = append(parts, k+"="+v)
+	}
+	return strings.Join(parts, " ")
 }
 
 func applyV3Result(tc *ToolCall, p *v3Payload, opt LoadOpts) {

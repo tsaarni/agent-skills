@@ -426,6 +426,9 @@ func fillV2Call(tc *ToolCall, tu *v2ToolUse) {
 	default:
 		tc.Kind = KindOther
 	}
+	if tc.Kind != KindShell && tc.Kind != KindRead && tc.Kind != KindWrite {
+		tc.Args = argSummary(tu.Input)
+	}
 }
 
 func parseV2Results(data json.RawMessage, toolByID map[string]*ToolCall, opt LoadOpts) {

@@ -12,25 +12,38 @@ const defaultOutputLines = 6
 
 func newShowCmd(g *globals) *cobra.Command {
 	var outputLines int
+	var all bool
+	var color string
 	cmd := &cobra.Command{
 		Use:   "show <session>[#turn]",
 		Short: "Print one turn, or a session, in readable form",
 		Long: `Print a turn ("5437257e#12") or a session ("5437257e").
 
-A turn is shown with its prompt, tool calls and response. Tool output is cut
-to a few lines; use --output-lines N to change that.
+A turn is shown with its prompt, tool calls (with arguments and output) and
+response. Tool output is cut to a few lines; use --output-lines N to change
+that (-1 = all).
 
-A session without a turn number is shown as a list of turns.`,
+A session without a turn number is shown as a list of turns. With --all,
+every turn of the session is printed in full, one after another.
+
+Turn headers and request lines are colored when writing to a terminal; use
+--color always to keep colors when piping (for example to less -R).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runShow(g, args[0], outputLines)
+			on, err := useColor(color, g.out)
+			if err != nil {
+				return err
+			}
+			return runShow(g, args[0], outputLines, all, on)
 		},
 	}
-	cmd.Flags().IntVar(&outputLines, "output-lines", defaultOutputLines, "lines of tool output to show per call (0 = none)")
+	cmd.Flags().IntVar(&outputLines, "output-lines", defaultOutputLines, "lines of tool output to show per call (0 = none, -1 = all)")
+	cmd.Flags().BoolVar(&all, "all", false, "print every turn of the session in full")
+	cmd.Flags().StringVar(&color, "color", "auto", "color turn and request lines: auto (terminal only, off with NO_COLOR), always, never")
 	return cmd
 }
 
-func runShow(g *globals, selector string, outputLines int) error {
+func runShow(g *globals, selector string, outputLines int, all, color bool) error {
 	sel, err := parseSelector(selector)
 	if err != nil {
 		return err
@@ -59,11 +72,17 @@ func runShow(g *globals, selector string, outputLines int) error {
 		if turn == nil {
 			return fmt.Errorf("session %s has no turn #%d (%d turns)", shortID(sess.ID), sel.Turn, len(sess.Turns))
 		}
-		printTurn(g.out, sess, turn, outputLines)
+		printTurn(g.out, sess, turn, outputLines, color)
 		return nil
 	}
 
 	printSessionSummary(g.out, sess)
+	if all {
+		for i := range sess.Turns {
+			fmt.Fprintln(g.out)
+			printTurn(g.out, sess, &sess.Turns[i], outputLines, color)
+		}
+	}
 	return nil
 }
 
@@ -107,8 +126,8 @@ func requestSummary(t *Turn) string {
 // printTurn prints the prompt, then each request followed by the tool calls
 // it made, then the response. Without per-request data, only the tool calls
 // are listed.
-func printTurn(w io.Writer, s *Session, t *Turn, outputLines int) {
-	fmt.Fprintln(w, turnHeader(s, t))
+func printTurn(w io.Writer, s *Session, t *Turn, outputLines int, color bool) {
+	fmt.Fprintln(w, paint(color, styleTurn, turnHeader(s, t)))
 	if sum := requestSummary(t); sum != "" {
 		fmt.Fprintln(w, sum)
 	}
@@ -119,7 +138,7 @@ func printTurn(w io.Writer, s *Session, t *Turn, outputLines int) {
 	// made up to a request's time belong to it.
 	next := 0
 	for _, r := range t.Requests {
-		printRequest(w, r)
+		printRequest(w, r, color)
 		for next < len(t.Tools) && !t.Tools[next].Time.After(r.Time) {
 			printTool(w, t.Tools[next], s.Workspace, outputLines)
 			next++
@@ -133,13 +152,14 @@ func printTurn(w io.Writer, s *Session, t *Turn, outputLines int) {
 	}
 }
 
-func printRequest(w io.Writer, r Request) {
+func printRequest(w io.Writer, r Request, color bool) {
 	line := fmt.Sprintf("= request   %.2f credits", r.Credits)
 	if r.Context >= 0 {
 		line += fmt.Sprintf("   context %.1f%%", r.Context)
 	}
+	line = paint(color, styleRequest, line)
 	if r.Cold() {
-		line += fmt.Sprintf("   cold: %s after the previous request", fmtDur(r.Gap))
+		line += paint(color, styleCold, fmt.Sprintf("   cold: %s after the previous request", fmtDur(r.Gap)))
 	}
 	fmt.Fprintln(w, line)
 }
@@ -152,7 +172,6 @@ func printTool(w io.Writer, tc ToolCall, workspace string, outputLines int) {
 	switch tc.Kind {
 	case KindShell:
 		fmt.Fprintf(w, "$ %s%s\n", tc.Command, tag)
-		printOutput(w, tc.Output, outputLines)
 	case KindWrite:
 		for _, p := range tc.Paths {
 			fmt.Fprintf(w, "✎ %s%s\n", relPath(p, workspace), tag)
@@ -163,8 +182,13 @@ func printTool(w io.Writer, tc ToolCall, workspace string, outputLines int) {
 	case KindRead:
 		fmt.Fprintf(w, "· read %s%s\n", joinRel(tc.Paths, workspace), tag)
 	default:
-		fmt.Fprintf(w, "· %s%s\n", tc.Name, tag)
+		line := "· " + tc.Name
+		if tc.Args != "" {
+			line += " " + shorten(tc.Args, 160)
+		}
+		fmt.Fprintf(w, "%s%s\n", line, tag)
 	}
+	printOutput(w, tc.Output, outputLines)
 }
 
 func joinRel(paths []string, ws string) string {

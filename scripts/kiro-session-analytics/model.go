@@ -97,6 +97,7 @@ type ToolCall struct {
 	Command string    // shell only
 	Cwd     string
 	Paths   []string // files read or written
+	Args    string   // short argument summary; kinds other than shell, read and write
 	Status  string   // ok | failed | denied
 	Output  string   // filled only when requested
 }

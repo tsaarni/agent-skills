@@ -14,6 +14,6 @@ ln -sfn "$repo/prompts" "$prompts"
 echo "Linked prompts -> $prompts"
 
 # Global always-on steering rules (uncomment to enable):
-# mkdir -p ~/.kiro/steering
-# ln -sfn "$repo/rules/global-tools.md" ~/.kiro/steering/global-tools.md
-# echo "Linked global rules -> ~/.kiro/steering/global-tools.md"
+mkdir -p ~/.kiro/steering
+ln -sfn "$repo/rules/global-tools.md" ~/.kiro/steering/global-tools.md
+echo "Linked global rules -> ~/.kiro/steering/global-tools.md"

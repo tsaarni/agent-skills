@@ -36,6 +36,7 @@ func redactSession(s *Session) {
 		for j := range t.Tools {
 			tc := &t.Tools[j]
 			tc.Command = redact(tc.Command)
+			tc.Args = redact(tc.Args)
 			tc.Output = redact(tc.Output)
 		}
 	}

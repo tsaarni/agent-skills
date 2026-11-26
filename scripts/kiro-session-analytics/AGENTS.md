@@ -27,8 +27,10 @@ go run . <command> [options]
 | `habits` | When you work and how session length affects cost. Fixed report: turns, credits and active time per local hour and per weekday (bar scaled to turns; quiet hours inside the active range are listed as `-`); sessions bucketed by number of turns in steps of 5, up to the longest session, with credits, requests per turn and credits per request; credits per request by turn number for each model (`-` = fewer than 3 turns). The session length tables use v3 sessions only. Default period: last 30 days. |
 | `journal` | Work log per day and workspace: active time, credits, sessions, edited files, commits, pushes, PR URLs. Default period: today. |
 | `find` | Turns matching `--file PATH` (read or written, matched by path suffix), `--cmd TEXT` (shell command), `--text TEXT` (prompt or response) or `--output TEXT` (tool output, slow). Case-insensitive substrings. Several options combine with AND. Default period: last 7 days. |
-| `show ID#TURN` | One turn: prompt, tool calls, response. Tool output is cut to `--output-lines N` lines per call (default 6, 0 = none). With per-request data, each request is printed as a `= request` line (credits, context usage, `cold` with the time since the previous request) followed by the tool calls it made, and the header gives the request count, cold requests and subagent credits. |
-| `show ID` | Table of the turns in a session. |
+| `show ID#TURN` | One turn: prompt, tool calls, response. Each tool call shows its command, file paths or arguments, and its output cut to `--output-lines N` lines (default 6, 0 = none, -1 = all). With per-request data, each request is printed as a `= request` line (credits, context usage, `cold` with the time since the previous request) followed by the tool calls it made, and the header gives the request count, cold requests and subagent credits. |
+| `show ID` | Table of the turns in a session. With `--all`, the table followed by every turn in full (same format and `--output-lines` as `show ID#TURN`). |
+
+`show` colors turn headers and `= request` lines (cold part in yellow) when writing to a terminal. `--color always|never|auto` overrides that; `NO_COLOR` disables it in auto mode.
 
 `ID` is a session id prefix (4+ characters) as printed by `spend --by session`, `journal` and `find`. Hits are printed as `sess <id> #<turn>`, which is the argument for `show`.
 
