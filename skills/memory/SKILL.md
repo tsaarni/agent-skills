@@ -97,15 +97,15 @@ Fields:
 - **Optional** (omit rather than leave empty):
   - `start`: `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (local time) — when it becomes actionable. Omit if actionable now
   - `due`: same format — hard external deadline; omit if there is no real deadline
-  - `repeat`: `daily` | `weekly` | `biweekly` | `monthly` | `yearly` | `<N>d` | `<N>w` — `monthly` keeps the day of month; requires `start`
+  - `repeat`: `daily` | `weekly` | `biweekly` | `monthly` | `yearly` | `<N>d` | `<N>w` — requires `start`. `monthly`/`yearly` keep the day of month, clamped in short months; a last-day-of-month date stays on the last day. Use day 1–28 or the last day; 29–30 turn into month end after February
   - `priority`: `high` | `low` (omit when normal)
 
-Scheduling (computed from frontmatter by the context loading query, never stored):
+Scheduling (computed from frontmatter by `tasks.py`, never stored):
 - Overdue: active (`open`, `in-progress`, `waiting`) and `due` passed
 - Now: `open` or `in-progress`, and `start` reached or absent
 - Waiting: `waiting` (blocked on someone or something), and `start` reached or absent — not actionable, report separately
-- Soon (only with a horizon `UNTIL`): active, `start` in the future, and `start` or `due` on or before `UNTIL`
-- Upcoming: active and `start` in the future (beyond `UNTIL`, if set); appears under Now (or Waiting) once `start` is reached
+- Soon (only with a time window): active, `start` in the future, and `start` or `due` before the window ends
+- Upcoming: active and `start` in the future (after the window, if given); appears under Now (or Waiting) once `start` is reached
 
 Creating a task:
 1. Pick a `CamelCase.md` name; if a record on the topic already exists, add `status:` to it instead of creating a new file
@@ -131,8 +131,12 @@ Completed on 2026-11-26 → `start: 2026-12-03`. Completed late on 2026-12-12 �
 
 Rules:
 - Frontmatter is the only source of current state; logs are history only, never needed to compute state
-- Completing a non-repeating task: set `status: done`, log `COMPLETED: <optional note>`
-- Completing a repeating task: advance `start` (and `due`, if set) by `repeat` from their previous values, repeating until `start` is in the future (missed runs do not pile up); keep `status: open`; log `COMPLETED: next start <date>`
+- Complete tasks with `python3 <skill-dir>/scripts/tasks.py complete <Name> [note] [-p project]` (add `-n` to preview); never by hand. It:
+  - non-repeating: sets `status: done`, logs `COMPLETED: <note>`
+  - repeating: advances `start` (and `due`, if set) by `repeat` from their previous values until `start` is in the future (missed runs do not pile up), keeps `status: open`, logs `COMPLETED: next start <date>[; note]`
+  - bumps `updated` and appends the log line to this host's log
+  - refuses a repeating task whose `start` is not reached yet (likely already completed); pass `--early` only when the user really did the next run ahead of time
+  - refuses files with duplicate frontmatter keys or invalid dates/repeat; fix the file, then retry
 - Tasks only: appointments and meetings do not belong here
 - Prefer `status: cancelled` over deleting task files
 - Link related records in the body: `[ContourHotRestart](ContourHotRestart.md)`
@@ -168,37 +172,20 @@ Project: `contour`, `keycloak`, `openbao`, `vault`, `envoy`, ...
 
 ## Context loading
 
-Run at session start. Shows summaries of the 10 most recently touched records (deduplicated, active tasks excluded since they are listed separately) and all active tasks grouped as overdue / now / waiting / upcoming (high priority first). Groups are always relative to the real current time:
+Run at session start (`<skill-dir>` is the directory of this file):
 
 ```bash
-# 10 most recently touched records (active tasks excluded; done/cancelled tasks included)
-cd ~/storage/memory 2>/dev/null && rg -I "" logs/ 2>/dev/null | sort | awk -F' [|] ' '$4 ~ /^records\// {a[++n]=$4} END {for (i=n; i>0; i--) if (!s[a[i]]++) print a[i]}' | xargs -r rg -j1 --no-messages --files-without-match "^status: (open|in-progress|waiting)$" | head -10 | xargs -r rg -j1 -H --no-messages "^summary:"
+# 10 most recently modified records
+cd ~/storage/memory && rg --sortr=modified -m1 "^summary:" records/ | head -10
 
-# Active tasks: overdue / now / waiting / [soon] / upcoming
-# Optional horizon: UNTIL=YYYY-MM-DD[THH:MM] adds a "soon" group for tasks starting or due by then
-cd ~/storage/memory 2>/dev/null && awk -v now="$(date +%FT%R)" -v until="${UNTIL:-}" '
-BEGIN { if (until != "" && until !~ /T/) until = until "T23:59" }
-FNR==1 { fm=0; split("", f); if (FILENAME !~ /^records\/[^.\/]+\.md$/) nextfile }
-/^---$/ { if (++fm==2) emit(); next }
-fm==1 && match($0, /^[a-z]+: /) { f[substr($0,1,RLENGTH-2)] = substr($0,RLENGTH+1) }
-function emit(   g, x, out) {
-  if (f["status"] !~ /^(open|in-progress|waiting)$/) return
-  if (("due" in f) && f["due"] < substr(now,1,length(f["due"]))) g="1 overdue"
-  else if (("start" in f) && f["start"] > substr(now,1,length(f["start"]))) {
-    if (until != "" && (f["start"] <= substr(until,1,length(f["start"])) || (("due" in f) && f["due"] <= substr(until,1,length(f["due"]))))) g="4 soon"
-    else g="5 upcoming"
-  }
-  else if (f["status"] == "waiting") g="3 waiting"
-  else g="2 now"
-  out = g " " (!("priority" in f) ? 2 : f["priority"]=="high" ? 1 : 3) " " FILENAME ": " f["summary"]
-  for (x in f) if (x ~ /^(status|start|due|repeat|priority)$/) out = out " | " x "=" f[x]
-  print out
-}' records/*.md | sort | cut -d" " -f2,4-
+# Active tasks: overdue / now / waiting / upcoming, high priority first
+python3 <skill-dir>/scripts/tasks.py
 ```
 
-Task questions → run the Active tasks command above, then:
+Task questions → `python3 <skill-dir>/scripts/tasks.py [WINDOW]`. Groups are always relative to the real current time. Let the script do all date calculations; never compute dates or weekdays yourself. WINDOW is one of `--today`, `--tomorrow`, `--this-week`, `--next-week`, `--this-month`, `--next-month`, `--days N`, or `--since/--until` with `YYYY-MM-DD[THH:MM]` or a weekday name (`--help` for details). Then:
 - "What is pending / what should I do today?" → report `overdue` + `now`, then `waiting` separately (blocked, with what it waits on from the body)
-- "What is coming up this week / by Friday?" → run with `UNTIL=<last day of period>` and report `overdue` + `now` + `soon`; `overdue` always means late as of today
+- "What is coming up this week / next week / this month?" → the matching preset; report the printed window, `soon` as new in that period, `overdue` + `now` as carried over (lines marked `due in window` have a deadline in the period). `overdue` always means late as of today
+- "What do I need to do by Friday / by <date>?" → `--until fri` / `--until <date>` (a weekday means its next occurrence, today included)
 - "What am I waiting on?" → report `waiting`
 - "What is the next occurrence of X?" → its `start`
 - Repeating tasks need no special handling: after completion `start` holds the next occurrence, so they show as `upcoming` until that day and `now` from then on until completed again
