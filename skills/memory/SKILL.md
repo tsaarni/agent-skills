@@ -170,6 +170,8 @@ Type: `idea`, `troubleshooting`, `howto`, `reference`, `decision`, `obsolete`, .
 Domain: `tls`, `kubernetes`, `performance`, `auth`, `build`, `networking`, ...
 Project: `contour`, `keycloak`, `openbao`, `vault`, `envoy`, ...
 
+When the user asks to tag something `todo`, or a record holds work still to do, suggest turning it into a task (add `status: open`, see Tasks) and create it if they agree.
+
 ## Context loading
 
 Run at session start (`<skill-dir>` is the directory of this file):
