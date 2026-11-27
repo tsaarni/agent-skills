@@ -339,15 +339,15 @@ kubectl apply -f examples/gateway/00-crds.yaml
 Run a test with `runagent`:
 
 ```bash
-runagent run -n e2e-test --cwd ~/work/contour \
+runagent run -n contour-e2e-test --cwd ~/work/contour \
   --env CONTOUR_E2E_LOCAL_HOST=${HOST_IP} \
   --env CONTOUR_E2E_HTTP_URL_BASE=http://127-0-0-101.nip.io \
   --env CONTOUR_E2E_HTTPS_URL_BASE=https://127-0-0-101.nip.io \
   -- go run github.com/onsi/ginkgo/v2/ginkgo -tags=e2e -vv -poll-progress-after=120s \
   --focus "httpproxy-include-regex-condition" ./test/e2e/httpproxy/
 
-runagent wait e2e-test --timeout 600s
-runagent logs e2e-test --last 15
+runagent wait contour-e2e-test --timeout 600s
+runagent logs contour-e2e-test --last 15
 ```
 
 - `CONTOUR_E2E_LOCAL_HOST`: Envoy inside cluster connects to host Contour via this.
@@ -437,7 +437,7 @@ Create `.vscode/settings.json` to enable Go language server support for e2e test
 Run the doc site locally 
 
 ```bash
-runagent run -n hugo-site --cwd ~/work/contour/site -- hugo server --disableFastRender
+runagent run -n contour-docs-server --cwd ~/work/contour/site -- hugo server --disableFastRender
 ```
 
 View at http://localhost:1313. Edit markdown in `site/content/`.

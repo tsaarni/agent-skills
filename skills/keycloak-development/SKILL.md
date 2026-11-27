@@ -15,15 +15,16 @@ description: "Keycloak: build, debug, test, deploy to Kubernetes, admin REST API
 - Replace `<ADMIN_TOKEN>` with the actual token value obtained from the token endpoint using command `$(curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/master/protocol/openid-connect/token -d 'username=admin&password=admin&grant_type=password&client_id=admin-cli' | jq -r .access_token)`.
 - Maven/mvnd builds produce huge output. Run builds under `runagent` and use `runagent wait` to block until completion, then check the tail of the log:
   ```bash
-  runagent run -n build -- mvnd clean install ...; runagent wait build; runagent logs build --last 20
+  runagent run -n kc-build -- mvnd clean install ...; runagent wait kc-build; runagent logs kc-build --last 20
   ```
+  Run `runagent delete kc-build` once the logs are no longer needed.
 
 ## Building Keycloak
 
 ### Full Build
 ```bash
-runagent run -n build -- mvnd clean install -DskipTestsuite -DskipExamples -DskipTests; runagent wait build; runagent logs build --last 20 # Parallel build with mvnd (faster)
-runagent run -n build -- mvn clean install -DskipTestsuite -DskipExamples -DskipTests; runagent wait build; runagent logs build --last 20 # Regular maven build (slower but use if you have issues with mvnd)
+runagent run -n kc-build -- mvnd clean install -DskipTestsuite -DskipExamples -DskipTests; runagent wait kc-build; runagent logs kc-build --last 20 # Parallel build with mvnd (faster)
+runagent run -n kc-build -- mvn clean install -DskipTestsuite -DskipExamples -DskipTests; runagent wait kc-build; runagent logs kc-build --last 20 # Regular maven build (slower but use if you have issues with mvnd)
 ```
 
 Always use `-DskipTests`, not `-Dmaven.test.skip=true`. `-Dmaven.test.skip=true` skips test compilation, which also skips producing test-jars that some modules depend on.
@@ -57,8 +58,8 @@ Examples:
 
 ### Development Mode
 ```bash
-runagent delete keycloak >/dev/null 2>&1
-runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
+runagent delete kc-dev >/dev/null 2>&1
+runagent run -n kc-dev -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
   -Dkc.config.built=true -Dquarkus.args="start-dev --db=dev-mem" \
   -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin
 for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/master 2>/dev/null && { echo "ready after ${i}s"; break; }; sleep 1; done
@@ -66,8 +67,8 @@ for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/
 
 With PostgreSQL (requires running docker compose with PostgreSQL container):
 ```bash
-runagent delete keycloak >/dev/null 2>&1
-runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
+runagent delete kc-dev >/dev/null 2>&1
+runagent run -n kc-dev -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
   -Dkc.config.built=true \
   -Dquarkus.args="start-dev -Dkc.db=postgres -Dkc.db-url=jdbc:postgresql://localhost/keycloak -Dkc.db-username=keycloak -Dkc.db-password=keycloak" \
   -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin
@@ -76,8 +77,8 @@ for i in $(seq 1 90); do curl -s -o /dev/null -m 2 http://localhost:8080/realms/
 
 ### Per-Category Debug Logging
 ```bash
-runagent delete keycloak >/dev/null 2>&1
-runagent run -n keycloak -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
+runagent delete kc-dev >/dev/null 2>&1
+runagent run -n kc-dev -- ./mvnw -f quarkus/server/pom.xml compile quarkus:dev \
   -Dkc.config.built=true \
   '-Dquarkus.args=start-dev --db=dev-mem --log-level=org.keycloak.services.resources.admin.AdminRoot:debug,org.keycloak.services.managers.AuthenticationManager:debug' \
   -Dkc.bootstrap-admin-username=admin -Dkc.bootstrap-admin-password=admin

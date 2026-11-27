@@ -188,7 +188,7 @@ This phase applies to any explicit backport request: a CVE/security fix, a commi
 4. **Verify included dependency versions**
    - After dependency bumps (Quarkus, BOMs, version properties), check the resolved versions with Maven. Do not rely on BOM sources or pom.xml properties.
    ```bash
-   runagent run -n deptree -- mvnd dependency:tree -pl quarkus/server -Dincludes={groupId}[:{artifactId}],...; runagent wait deptree; runagent logs deptree --last 40
+   runagent run -n kc-deptree -- mvnd dependency:tree -pl quarkus/server -Dincludes={groupId}[:{artifactId}],...; runagent wait kc-deptree; runagent logs kc-deptree --last 40
    ```
 
 ### Phase 5: Finalization
@@ -242,17 +242,19 @@ This phase applies to any explicit backport request: a CVE/security fix, a commi
 Tests that cover the nordix fork's local changes. Run tests one at a time.
 
 ```bash
-runagent run -n build -- mvnd clean install -DskipTests; runagent wait build; runagent logs build --last 20
+runagent run -n kc-build -- mvnd clean install -DskipTests; runagent wait kc-build; runagent logs kc-build --last 20
 
 # e2e test for LDAP federation and LDAP password policy
-runagent run -n test-ldap -- mvnd test -Pauth-server-quarkus -pl testsuite/integration-arquillian/tests/base -Dkeycloak.logging.level=debug -Dtest="org.keycloak.testsuite.federation.ldap.**"; runagent wait test-ldap; runagent logs test-ldap --last 30
+runagent run -n kc-test-ldap -- mvnd test -Pauth-server-quarkus -pl testsuite/integration-arquillian/tests/base -Dkeycloak.logging.level=debug -Dtest="org.keycloak.testsuite.federation.ldap.**"; runagent wait kc-test-ldap; runagent logs kc-test-ldap --last 30
 
 # unit test for reloading Keystore
-runagent run -n test-keystore -- mvnd test -pl services -Dtest=org.keycloak.keystore.TestReloadingKeystore; runagent wait test-keystore; runagent logs test-keystore --last 15
+runagent run -n kc-test-keystore -- mvnd test -pl services -Dtest=org.keycloak.keystore.TestReloadingKeystore; runagent wait kc-test-keystore; runagent logs kc-test-keystore --last 15
 
 # e2e test for Vault SPI support for client secrets
-runagent run -n test-vault -- mvnd test -f tests/pom.xml -pl base -Dtest=ClientVaultTest; runagent wait test-vault; runagent logs test-vault --last 15
+runagent run -n kc-test-vault -- mvnd test -f tests/pom.xml -pl base -Dtest=ClientVaultTest; runagent wait kc-test-vault; runagent logs kc-test-vault --last 15
 ```
+
+Run `runagent delete <name>` once the logs are no longer needed.
 
 ## Evaluation Checklist
 
@@ -392,8 +394,8 @@ mvn clean install -DskipTestsuite -DskipExamples -DskipTests
 
 Start with truststore and LDAP client cert (for SASL EXTERNAL):
 ```bash
-runagent delete keycloak >/dev/null 2>&1
-runagent run -n keycloak -- mvn -f quarkus/server/pom.xml compile quarkus:dev \
+runagent delete kc-dev >/dev/null 2>&1
+runagent run -n kc-dev -- mvn -f quarkus/server/pom.xml compile quarkus:dev \
   -Dkc.config.built=true \
   "-Dquarkus.args=start-dev --db=dev-mem \
     --spi-truststore-file-file=/tmp/ldap-truststore.jks \
@@ -482,7 +484,7 @@ curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/toke
 ### Cleanup
 
 ```bash
-runagent delete keycloak
+runagent delete kc-dev
 runagent delete tshark
 runagent delete openldap
 docker compose -f $HOME/work/devenvs/keycloak/docker-compose.yaml down

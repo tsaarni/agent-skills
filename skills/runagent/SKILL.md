@@ -5,85 +5,52 @@ description: "Run servers and long-running commands in the background while debu
 
 `runagent` is installed and available in `PATH`. If not it can be run via `go run github.com/tsaarni/runagent/cmd/runagent@latest`
 
-```
-Usage: runagent <command> [flags]
+## Commands
 
-Flags:
-  -h, --help    Show context-sensitive help.
-      --json    Output in JSON format.
+Run `runagent <command> --help` for all flags. `<name>` also accepts a process ID.
 
-Commands:
-  run <command>
-    Spawn a background process.
-    -n, --name=NAME            Process name.
-    -e, --env=KEY=VALUE,...    Environment variable KEY=VALUE (repeatable).
-        --cwd=PATH             Working directory.
+| Command | Purpose | Useful flags |
+|---|---|---|
+| `run -n <name> -- <cmd...>` | Start a background process | `-e KEY=VALUE` (repeatable), `--cwd PATH` |
+| `ps [name]` | List processes, or show details for one | `-a` details for all |
+| `logs <name>` | Read output | `--last N`, `--stream stderr`, `--time-range -5m..` or `15:05:00..+2m` |
+| `wait <name>` | Block until exit | `--timeout 600s` |
+| `kill <name>` | Send signal (default SIGTERM) | `--signal SIGINT` |
+| `delete [name]` | Kill if running and delete logs | `--stopped`, `--all` |
+| `daemon status\|start\|stop\|clean` | Manage the daemon | |
 
-  ps [target]
-    List processes or show process details.
-    -a, --all                  Show details for all processes.
+Global flag `--json` gives machine-readable output. Avoid `logs -f`: it blocks until interrupted.
 
-  logs <target>
-    Read process log output.
-        --type=TYPES           Event types to show (comma-separated: start,log,stats,stop).
-        --time-range=FROM..TO  Time range (FROM..TO). FROM/TO: -5m (ago), 21:00:00, 2026-06-24T21:00:00, +2m (relative to FROM).
-        --limit=N              Max events to return (first N from window).
-        --last=N               Return last N matching events.
-        --time-format=FORMAT   Timestamp format: time, datetime, none, or Go layout string.
-    -f, --follow               Follow log output.
-        --stream=STREAM        Filter by stream (stdout or stderr).
+## Process states
 
-  kill <target>
-    Send signal to process (default: SIGTERM).
-        --signal=SIGNAL        Signal to send.
+- **Running**: process is alive.
+- **Exited**: process called exit(). `runagent wait` prints the exit code and exits with it, so `runagent wait <name> && ...` works.
+- **Killed**: terminated by signal. `runagent wait` exits with 128 + signal number.
 
-  delete [target]
-    Kill process (if running) and delete its logs.
-        --all                  Delete all processes.
-        --stopped              Delete all processes that are not running (exited or killed).
+`runagent ps` shows state, PID, command, uptime, CPU, memory, open file descriptors and disk I/O.
 
-  wait <target>
-    Block until process exits.
-        --timeout=DURATION     Timeout duration (e.g., 30s).
+`runagent logs` line markers: │ = runagent control messages, ~ = resource stats, blank = process stdout/stderr.
 
-  daemon status
-    Show daemon status.
+## Workflows
 
-  daemon start
-    Start the daemon.
+Server (runs until stopped):
 
-  daemon stop
-    Stop the daemon.
-
-  daemon clean
-    Remove all runtime and state files.
-
-Examples:
-  runagent run -n web -- python3 -m http.server 8080
-  runagent ps
-  runagent logs web --last 20
-  runagent wait web
-  runagent delete web
+```bash
+runagent run -n <name> -- <command...>
+runagent logs <name> --last 10    # confirm it started
 ```
 
-Process States
+Batch process (exits on its own, e.g. build or test suite):
 
-- **Running** — process is alive
-- **Exited** — process called exit() (check exit code for success/failure)
-- **Killed** — terminated by signal
-
-`runagent ps` shows process state, PID, command, uptime, CPU usage, memory usage, open file descriptors, disk I/O, etc.
-
-`runagent logs` log line markers: │ = runagent control messages, ~ = resource stats, blank = process stdout/stderr. Stderr lines are shown in red when color is enabled. Timestamp format is customizable with --time-format.
-
+```bash
+runagent run -n <name> -- <command...>; runagent wait <name>; runagent logs <name> --last <N>
+runagent delete <name>            # after a successful build; keep failed builds and test runs
+```
 
 ## Rules
 
-* Always name processes using `-n <name>`.
-* For background jobs that complete on their own (such as long compilations), run: `runagent run -n <name> -- <compile-commands...>; runagent wait <name>; runagent logs <name> --last <num-lines>`.
-* To wait for a process to finish, run `runagent wait <name>`. This returns immediately when the process exits, so you do not need to poll.
-* Do not filter output when starting a process (avoid commands like `| grep ERROR`). Filter output later using `runagent logs`.
-* `runagent run` automatically replaces dead processes that have the same name. If a process is still active, the command fails; stop or remove it first with `runagent kill <name>` or `runagent delete <name>`.
-* When re-running recurring batch jobs prefer using same name in consequent runs, to avoid cluttering the `runagent ps` list with too many entries.
-* After launching a process, run `runagent logs <name> --last 10` to confirm that it started properly.
-* Keep processes alive after a test run unless instructed to remove them. They may be needed for debugging or follow-up testing.
+* Always name processes with `-n <name>`. Reuse the same name for repeated runs of the same build or test; do not invent new names per attempt.
+* Use `runagent wait <name>` instead of polling. It returns as soon as the process exits.
+* Do not filter output at start (no `| grep ERROR`). Filter later with `runagent logs`.
+* `runagent run` replaces an exited or killed process with the same name, but fails if it is still running. Stop it first with `runagent kill <name>` or `runagent delete <name>`.
+* Keep exited processes by default; their logs may be needed for debugging or follow-up testing. Exception: delete a build process once the build has succeeded and its output has been checked.
