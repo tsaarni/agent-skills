@@ -4,13 +4,7 @@ All examples assume the session from SKILL.md: `kc = Keycloak(...)`, `realm`, `A
 
 ## Components and LDAP Federation
 
-User federation, key providers and other components are `POST {A}/components`. Config values are lists of strings. To create components from JSON request files:
-
-```python
-import json
-for f in ["rest-requests/create-ldap-simple-auth-provider.json"]:
-    print(kc.post(f"{A}/components", json=json.load(open(f))).expect(201))
-```
+User federation, key providers and other components are `POST {A}/components`. Config values are lists of strings.
 
 Test the connection and bind first. The URL is the LDAP server as Keycloak reaches it:
 
