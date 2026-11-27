@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Test target for the java-debugging skill: a small HTTP server where each endpoint has one known
- * behaviour, so jdb, jcmd, jstat and JFR commands can be checked against a known result before
+ * behaviour, so debugger, jcmd, jstat and JFR commands can be checked against a known result before
  * using them on a real application.
  *
  * Endpoints (port given as first argument, default 8081):
@@ -27,10 +27,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   /fail           throws IllegalStateException, returns 500
  *   anything else   returns "ok"
  *
- * Every request increments the static field `requests` (watchpoint target: watch DebugTarget.requests).
+ * Every request increments the static field `requests` (watchpoint target: DebugTarget.requests).
  * Worker threads are named worker-1..worker-8.
  *
- * Build and run with JDWP on localhost:5006 (-g keeps local variable names for jdb):
+ * Build and run with JDWP on localhost:5006 (-g keeps local variable names for the debugger):
  *
  *   mkdir -p /tmp/debug-target
  *   javac -g -d /tmp/debug-target <skill-dir>/scripts/DebugTarget.java
@@ -40,24 +40,28 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   curl http://127.0.0.1:8081/      # prints "ok"
  *   PID=$(jcmd -l | awk '/DebugTarget/ {print $1}')
  *
- * jdb session (pysess, using scripts/jdb_driver.py; adjust the SKILL.md setup to these ports):
+ * Debugger session (pysess, using scripts/jdi_driver.py; adjust the SKILL.md setup to these ports):
  *
- *   j = Jdb("localhost:5006")     # get() must use http://127.0.0.1:8081
+ *   j = Jdi("localhost:5006")     # get() must use http://127.0.0.1:8081
  *
- * Forcing the /iterate vs /remove race (verified on JDK 25, gives HTTP 500 every time):
+ * Expected results with the debugger (verified on JDK 25):
  *
- *   get("/reset")
- *   j.cmd("stop thread in DebugTarget.visit")       # thread A stops inside the loop
- *   a = pysess.bg(get, "/iterate")
- *   j.collect(["e.getKey()"], count=20, keep=lambda v: v[0] == '"k5"')
- *   j.cmd("clear DebugTarget.visit")
- *   print(get("/remove?key=k8"))                     # thread B changes the map while A waits
- *   j.cmd("catch caught java.util.ConcurrentModificationException")
- *   j.cont()                                         # A continues and its iterator fails
- *   print(j.wait_hit()); print(j.where(5))           # stack at the throw, all threads suspended
- *   j.cmd("ignore caught java.util.ConcurrentModificationException")
- *   j.cmd("resume")
- *   print(a.result(timeout=10))                      # (500, 'java.util.ConcurrentModificationException')
+ *   Forcing the /iterate vs /remove race gives HTTP 500 every time:
+ *     get("/reset")
+ *     ev = j.events("DebugTarget.visit", run=lambda: get("/iterate"))
+ *     a = next(h for h in ev if h.locals["e"].getKey() == "k5").hold()
+ *     ev.close()                                   # thread A stays inside the loop
+ *     print(get("/remove?key=k8"))                 # thread B changes the map while A waits
+ *     with j.events(catch="java.util.ConcurrentModificationException") as cme:
+ *         a.resume(); print(cme.next())            # A's iterator fails: the throw site
+ *     print(ev.result())                           # (500, 'java.util.ConcurrentModificationException\n')
+ *   8 concurrent /iterate with a breakpoint in visit: 80 hits, each with its own stack and
+ *     e.getKey() called in its thread, all requests 200.
+ *   /alloc?mb=1&retain=true, then j.retainers() of a 1 MB byte[]:
+ *     DebugTarget.retained (static) -> java.util.ArrayList.elementData -> java.lang.Object[][i] -> byte[]
+ *   h.force_return(5) at DebugTarget.visit: /iterate returns "visited 50".
+ *   events(calls="DebugTarget", suspend="none") on /iterate: call_tree() shows handle, query,
+ *     iterate and 10 visit calls with their return values.
  *
  * Expected results with the metrics tools (verified on JDK 25, recording with settings=profile):
  *

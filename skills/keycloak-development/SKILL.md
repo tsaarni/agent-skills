@@ -1,6 +1,6 @@
 ---
 name: keycloak-development
-description: "Keycloak: build, debug, test, deploy to Kubernetes, admin REST API."
+description: "Keycloak: build, debug, test, deploy to Kubernetes, admin REST API, login flows and database queries (Python drivers for pysess)."
 ---
 
 # Keycloak Development
@@ -12,7 +12,7 @@ description: "Keycloak: build, debug, test, deploy to Kubernetes, admin REST API
 - Assume Keycloak is already running; check for it or start it only when explicitly asked to do so.
 - Infer names and IDs from the context when possible. For example, if a realm name is required and there is only one realm, infer that realm name. If there are multiple realms, ask for clarification or use `master` as default.
 - Use `http://keycloak.127-0-0-1.nip.io:8080` as the default base URL for API requests if the user has not specified a different URL for Keycloak.
-- Replace `<ADMIN_TOKEN>` with the actual token value obtained from the token endpoint using command `$(curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/master/protocol/openid-connect/token -d 'username=admin&password=admin&grant_type=password&client_id=admin-cli' | jq -r .access_token)`.
+- Call REST APIs and drive login flows with the Python driver in a `pysess` session, see [REST API and Login Flows](#rest-api-and-login-flows-python-driver).
 - Maven/mvnd builds produce huge output. Run builds under `runagent` and use `runagent wait` to block until completion, then check the tail of the log:
   ```bash
   runagent run -n kc-build -- mvnd clean install ...; runagent wait kc-build; runagent logs kc-build --last 20
@@ -204,6 +204,10 @@ pnpm lint
 
 ## Database Management
 
+### PostgreSQL
+
+Query the Keycloak database from a `pysess` session with [scripts/psql_driver.py](./scripts/psql_driver.py), in kind, docker compose or with a local psql: [references/database.md](./references/database.md).
+
 ### H2 Database
 ```bash
 
@@ -221,724 +225,70 @@ rm ./quarkus/server/target/kc/data/h2/keycloakdb*
 
 ## Test Servers
 
-Use provided docker compose wrapper [./scripts/docker-compose-wrapper.sh](./scripts/docker-compose-wrapper.sh) to start test server containers.
-
 ### PostgreSQL
 
-```bash
-<SKILL_ROOT>./scripts/docker-compose-wrapper.sh up -d postgres
+Start it with the docker compose wrapper [./scripts/docker-compose-wrapper.sh](./scripts/docker-compose-wrapper.sh):
 
-# Connect to PostgreSQL CLI
-docker exec -it keycloak-postgres-1 psql --username=keycloak
+```bash
+<skill-dir>/scripts/docker-compose-wrapper.sh up -d postgres
 ```
+
+Query it with the psql driver, see [references/database.md](./references/database.md).
 
 ### OpenLDAP
 
-```bash
-<SKILL_ROOT>./scripts/docker-compose-wrapper.sh up -d openldap
-```
-
-## Admin REST API
-
-### URL Structure
-
-Admin API URLs follow the pattern:
-- `http://keycloak-host:port/admin/realms/{realm-name}/{resource}`
-- Example: `http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users`
-
-The `{realm-name}` in the URL specifies which realm you're managing. Use `master` for the master realm or your custom realm name (e.g., `my-realm`, `example-realm`).
-
-### Realm Management
-
-Get realm:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Create realm:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/ \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "id": "example-realm",
-    "realm": "example-realm",
-    "enabled": true,
-    "adminEventsEnabled": true
-  }'
-```
-
-Update realm settings:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "ssoSessionIdleTimeout": 86400,
-    "accessTokenLifespan": 86400
-  }'
-```
-
-Delete realm:
-
-```bash
-curl -s -X DELETE http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm \
-  -H "Authorization: bearer <ADMIN_TOKEN>"
-```
-
-Export realm configuration:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/partial-export \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-### User Management
-
-List users:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Get user by username:
-
-```bash
-curl -s "http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users?username=joe" \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Get user by ID:
-
-```bash
-id=$(curl -s "http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users?username=joe" \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq -r '.[0].id')
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users/$id \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Create user with password:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "username": "joe",
-    "enabled": true,
-    "credentials": [{"type": "password", "value": "joe", "temporary": false}]
-  }'
-```
-
-NOTE: This minimal example omits `email`, `firstName`, `lastName`. The default user profile in non-master realms requires these fields — without them, login fails with `"Account is not fully set up"`. The master realm is more lenient. Prefer the full example below for users that need to log in.
-
-Create user with full details:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "username": "joe",
-    "enabled": true,
-    "email": "joe@example.com",
-    "firstName": "Joe",
-    "lastName": "Average",
-    "emailVerified": true,
-    "credentials": [{"type": "password", "value": "joe", "temporary": false}]
-  }'
-```
-
-Create user with custom attributes:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "username": "ldapuser",
-    "enabled": true,
-    "firstName": "Ldap",
-    "lastName": "User",
-    "attributes": {"telephoneNumber": ["1", "2", "3"]}
-  }'
-```
-
-Delete user:
-
-```bash
-curl -s -X DELETE http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users/$id \
-  -H "Authorization: bearer <ADMIN_TOKEN>"
-```
-
-Update user attributes:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users/$USER_ID \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"firstName": "John", "lastName": "Smith"}'
-```
-
-Update user custom attributes:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users/$USER_ID \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"attributes": {"attr3": "val3"}}'
-```
-
-### Role Management
-
-Get client roles:
-
-```bash
-MASTER_REALM_ID=$(curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/clients \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-| jq -r '.[] | select(.clientId=="master-realm") | .id')
-
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/clients/$MASTER_REALM_ID/roles \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Assign client role to user:
-
-```bash
-VIEW_CLIENTS_ROLE=$(curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/clients/$MASTER_REALM_ID/roles \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-| jq -c '.[] | select(.name=="view-clients")')
-
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users/$USER_ID/role-mappings/clients/$MASTER_REALM_ID \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d "[$VIEW_CLIENTS_ROLE]"
-```
-
-Get user's realm role mappings:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users/$USER_ID/role-mappings/realm \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Get user's groups:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/users/$USER_ID/groups \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-### Client Management
-
-List all clients:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Get client by clientId:
-
-```bash
-curl -s "http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients?clientId=foo" \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Get client by ID:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients/$CLIENT_ID \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Create confidential client:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "clientId": "foo",
-    "publicClient": false,
-    "redirectUris": ["http://localhost"],
-    "serviceAccountsEnabled": true,
-    "secret": "mysecret"
-  }'
-```
-
-Create client with authorization services:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "clientId": "example-client",
-    "publicClient": false,
-    "secret": "example-secret",
-    "directAccessGrantsEnabled": true,
-    "rootUrl": "http://localhost:18080",
-    "redirectUris": ["http://localhost:18080/*"],
-    "authorizationServicesEnabled": true,
-    "serviceAccountsEnabled": true
-  }'
-```
-
-Get client secret:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients/$CLIENT_ID/client-secret \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Delete client:
-
-```bash
-curl -s -X DELETE http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients/$CLIENT_ID \
-  -H "Authorization: bearer <ADMIN_TOKEN>"
-```
-
-### Client Scopes
-
-Create client scope:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/client-scopes \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"name": "my-scope", "protocol": "openid-connect"}'
-```
-
-Supported protocols: `openid-connect`, `saml`, `docker-v2`, `oid4vc`
-
-### LDAP Federation
-
-Create LDAP user federation:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/components \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "name": "ldap",
-    "providerId": "ldap",
-    "providerType": "org.keycloak.storage.UserStorageProvider",
-    "config": {
-      "connectionUrl": ["ldap://localhost:389"],
-      "usersDn": ["ou=users,o=example"],
-      "bindDn": ["cn=ldap-admin,ou=users,o=example"],
-      "bindCredential": ["ldap-admin"],
-      "authType": ["simple"],
-      "editMode": ["WRITABLE"],
-      "vendor": ["other"],
-      "usernameLDAPAttribute": ["uid"],
-      "rdnLDAPAttribute": ["uid"],
-      "uuidLDAPAttribute": ["entryUUID"],
-      "userObjectClasses": ["inetOrgPerson, organizationalPerson"],
-      "importEnabled": ["true"],
-      "syncRegistrations": ["true"]
-    }
-  }'
-```
-
-Get LDAP configuration:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/components/$COMPONENT_ID \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-List user storage providers:
-
-```bash
-curl -s "http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/components?parent=master&type=org.keycloak.storage.UserStorageProvider" \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Test LDAP connection:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/testLDAPConnection \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d @rest-requests/test-ldap-authentication.json
-```
-
-### Identity Provider (IDP) Brokering
-
-Create OIDC identity provider:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/identity-provider/instances \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "alias": "oidc-keycloak",
-    "providerId": "oidc",
-    "config": {
-      "clientId": "my-client-id",
-      "clientSecret": "my-secret",
-      "authorizationUrl": "https://another-keycloak:8443/realms/other-realm/protocol/openid-connect/auth",
-      "tokenUrl": "https://another-keycloak:8443/realms/other-realm/protocol/openid-connect/token",
-      "userInfoUrl": "https://another-keycloak:8443/realms/other-realm/protocol/openid-connect/userinfo",
-      "jwksUrl": "https://another-keycloak:8443/realms/other-realm/protocol/openid-connect/certs",
-      "logoutUrl": "https://another-keycloak:8443/realms/other-realm/protocol/openid-connect/logout",
-      "issuer": "https://another-keycloak:8443/realms/other-realm",
-      "redirectUri": "https://keycloak.127-0-0-1.nip.io:8443/realms/example-realm/broker/oidc-keycloak/endpoint"
-    }
-  }'
-```
-
-Get IDP configuration:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/identity-provider/instances/oidc-keycloak \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-### Authorization Services (UMA)
-
-Get client ID for authorization configuration:
-
-```bash
-CLIENT_ID=$(curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-| jq -r '.[] | select(.clientId=="example-client") | .id')
-```
-
-Create protected resource:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients/$CLIENT_ID/authz/resource-server/resource \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "name": "example-resource",
-    "type": "urn:resource-server:example-resource",
-    "uris": ["/"],
-    "scopes": [{"name": "GET"}]
-  }'
-```
-
-Create user policy:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients/$CLIENT_ID/authz/resource-server/policy/user \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"name": "joe-policy", "users": ["joe"]}'
-```
-
-Create resource permission:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients/$CLIENT_ID/authz/resource-server/permission/resource \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "name": "example-resource-permission",
-    "resources": ["example-resource"],
-    "policies": ["joe-policy"]
-  }'
-```
-
-Export authorization settings:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients/$CLIENT_ID/authz/resource-server/settings \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-### Token Operations
-
-Get user token with password grant:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/example-realm/protocol/openid-connect/token \
-  -d 'grant_type=password&username=joe&password=joe&scope=openid&client_id=example-client&client_secret=example-secret' | jq .
-```
-
-Get client token with client credentials:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/example-realm/protocol/openid-connect/token \
-  -d 'grant_type=client_credentials&client_id=foo&client_secret=mysecret' | jq .
-```
-
-Exchange authorization code for token:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/example-realm/protocol/openid-connect/token \
-  -d "grant_type=authorization_code&code=$AUTHORIZATION_CODE&client_id=example-client&client_secret=example-secret&redirect_uri=http://localhost:18080/foo" | jq .
-```
-
-Refresh token:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/example-realm/protocol/openid-connect/token \
-  -d "refresh_token=$REFRESH_TOKEN&grant_type=refresh_token&scope=openid&client_id=example-client&client_secret=example-secret" | jq .
-```
-
-UMA ticket grant:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/example-realm/protocol/openid-connect/token \
-  -d "grant_type=urn:ietf:params:oauth:grant-type:uma-ticket&claim_token=$ID_TOKEN&claim_token_format=http://openid.net/specs/openid-connect-core-1_0.html#IDToken&client_id=example-client&client_secret=example-secret&audience=example-client&permission=example-resource#GET" | jq .
-```
-
-UMA ticket grant with decision response:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/example-realm/protocol/openid-connect/token \
-  -d "grant_type=urn:ietf:params:oauth:grant-type:uma-ticket&claim_token=$ID_TOKEN&claim_token_format=http://openid.net/specs/openid-connect-core-1_0.html#IDToken&client_id=example-client&client_secret=example-secret&audience=example-client&permission=example-resource#GET&response_mode=decision" | jq .
-```
-
-### Discovery Endpoints
-
-Get OpenID configuration:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/realms/master/.well-known/openid-configuration | jq .
-```
-
-Get JWKS (public keys):
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/realms/master/protocol/openid-connect/certs | jq .
-```
-
-### Admin Events
-
-Get admin events (requires "save admin events" enabled):
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/admin-events \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-### REST API Testing Tips
-
-#### Short-lived access tokens
-
-Set `accessTokenLifespan` to 1 second, then test token expiry:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"accessTokenLifespan": 1}'
-```
-
-Get a token and use it immediately (200), wait 2 seconds and try again (401 with `"The access token is outside its validity period"`).
-
-NOTE: The admin token you used to set this also gets 1-second lifespan. You must get a fresh admin token to reset it back:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"accessTokenLifespan": 300}'
-```
-
-#### Invalidate all tokens with not-before policy
-
-Set `notBefore` to reject all tokens issued before a given time:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json "{\"notBefore\": $(date +%s)}"
-```
-
-Tokens with `iat` < `notBefore` are rejected with `"invalid_token"`. There must be a time gap between the old token's issuance and the `notBefore` value.
-
-Reset:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"notBefore": 0}'
-```
-
-#### Brute force lockout
-
-Enable brute force on an existing realm with a low threshold:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"bruteForceProtected": true, "failureFactor": 2}'
-```
-
-Or create a realm with brute force protection enabled:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/ \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "id": "example-realm",
-    "realm": "example-realm",
-    "enabled": true,
-    "bruteForceProtected": true
-  }'
-```
-
-Fail login twice (user must exist):
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/master/protocol/openid-connect/token \
-  -d 'grant_type=password&username=joe&password=wrong&client_id=admin-cli'
-```
-
-Check brute force status:
-
-```bash
-curl -s http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/attack-detection/brute-force/users/$USER_ID \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq .
-```
-
-Response shows `"numFailures"`, `"disabled": true`. Even correct password is rejected while locked.
-
-Unlock user:
-
-```bash
-curl -s -X DELETE http://keycloak.127-0-0-1.nip.io:8080/admin/realms/master/attack-detection/brute-force/users/$USER_ID \
-  -H "Authorization: bearer <ADMIN_TOKEN>"
-```
-
-#### Throwaway test realm
-
-Create a realm, run tests, delete it:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/ \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"id": "test-realm", "realm": "test-realm", "enabled": true}'
-```
-
-NOTE: When creating users in a new realm, include `email`, `firstName`, `lastName` — the default user profile requires them. Without these fields, login fails with `{"error":"invalid_grant","error_description":"Account is not fully set up"}`.
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/test-realm/users \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "username": "testuser",
-    "enabled": true,
-    "email": "test@example.com",
-    "firstName": "Test",
-    "lastName": "User",
-    "emailVerified": true,
-    "credentials": [{"type": "password", "value": "testpass", "temporary": false}]
-  }'
-```
-
-Delete the realm when done (removes all users, clients, config):
-
-```bash
-curl -s -X DELETE http://keycloak.127-0-0-1.nip.io:8080/admin/realms/test-realm \
-  -H "Authorization: bearer <ADMIN_TOKEN>"
-```
-
-#### Token introspection
-
-Token introspection requires the introspecting client to be in the token's `aud` claim. Use an audience protocol mapper to add the resource server client to the token audience.
-
-Create the app client and resource server client:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "clientId": "my-app",
-    "publicClient": false,
-    "secret": "my-app-secret",
-    "directAccessGrantsEnabled": true,
-    "serviceAccountsEnabled": true
-  }'
-
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "clientId": "my-resource-server",
-    "publicClient": false,
-    "secret": "rs-secret",
-    "serviceAccountsEnabled": true
-  }'
-```
-
-Add audience mapper to the app client:
-
-```bash
-APP_UUID=$(curl -s "http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients?clientId=my-app" \
-  -H "Authorization: bearer <ADMIN_TOKEN>" | jq -r '.[0].id')
-
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm/clients/$APP_UUID/protocol-mappers/models \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{
-    "name": "resource-server-audience",
-    "protocol": "openid-connect",
-    "protocolMapper": "oidc-audience-mapper",
-    "config": {
-      "included.client.audience": "my-resource-server",
-      "id.token.claim": "false",
-      "access.token.claim": "true",
-      "introspection.token": "true"
-    }
-  }'
-```
-
-Introspect a token using the resource server client:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/example-realm/protocol/openid-connect/token/introspect \
-  -d "token=$ACCESS_TOKEN&client_id=my-resource-server&client_secret=rs-secret" | jq .
-```
-
-Returns `"active": true` for valid tokens, `"active": false` for expired or invalid tokens.
-
-NOTE: If introspection returns `{"active":false}` for a valid token, check that the introspecting client is in the token's `aud` claim.
-
-#### Decode tokens offline
-
-Decode JWT payload with `jq`:
-
-```bash
-echo $ACCESS_TOKEN | jq -R 'split(".")[1] | @base64d | fromjson'
-```
-
-Decode JWT header:
-
-```bash
-echo $ACCESS_TOKEN | jq -R 'split(".")[0] | @base64d | fromjson'
-```
-
-Check if a token is expired:
-
-```bash
-echo $ACCESS_TOKEN | jq -R 'split(".")[1] | @base64d | fromjson | .exp - now | if . > 0 then "Expires in \(. | round) seconds" else "Expired \((. * -1) | round) seconds ago" end'
-```
-
-#### Session idle timeout
-
-Set `ssoSessionIdleTimeout` to a short value:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"ssoSessionIdleTimeout": 10}'
-```
-
-After 10 seconds of inactivity, refresh token fails with `{"error":"invalid_grant","error_description":"Token is not active"}`.
-
-Reset:
-
-```bash
-curl -s -X PUT http://keycloak.127-0-0-1.nip.io:8080/admin/realms/example-realm \
-  -H "Authorization: bearer <ADMIN_TOKEN>" \
-  --json '{"ssoSessionIdleTimeout": 1800}'
-```
-
-#### Logout and verify
-
-Logout using the refresh token:
-
-```bash
-curl -s -X POST http://keycloak.127-0-0-1.nip.io:8080/realms/example-realm/protocol/openid-connect/logout \
-  -d "refresh_token=$REFRESH_TOKEN&client_id=example-client&client_secret=example-secret"
-```
-
-After logout, refresh token is rejected with `{"error":"invalid_grant","error_description":"Session not active"}`.
-
-NOTE: The access token (JWT) may still pass local validation until it expires, since it is self-contained. Only the refresh token and server-side session are invalidated immediately.
+To run OpenLDAP in Kind or Docker (image, directory content, certificates, TLS keylog), read memory record `OpenLdapInContainer`.
+
+## REST API and Login Flows (Python driver)
+
+Call the Admin REST API, token endpoints and login pages from a `pysess` session (see the [pysess skill](../pysess/SKILL.md)) with [scripts/kc_driver.py](./scripts/kc_driver.py) (stdlib only). It keeps the admin token, cookies and OTP state between steps. `Keycloak` works like `requests` with Keycloak REST paths; `SimpleBrowser` posts the login pages' forms like a browser, without JavaScript.
+
+```bash
+pysess new -n kc <skill-dir>/scripts/kc_driver.py
+pysess exec kc <<'EOF'
+api()                                              # the driver API, one line per call; details: help(name)
+kc = Keycloak("http://keycloak.127-0-0-1.nip.io:8080")   # admin/admin; paths under /admin/ get the admin token
+realm = "example-realm"
+A = f"/admin/realms/{realm}"                       # Admin REST base of the realm
+T = f"/realms/{realm}/protocol/openid-connect"     # OIDC endpoints of the realm
+c = {"client_id": "example-client", "client_secret": "example-secret"}
+kc.post("/admin/realms", json={"realm": realm, "enabled": True}).expect(201)
+kc.post(f"{A}/clients", json={"clientId": "example-client", "secret": "example-secret",
+        "redirectUris": ["http://localhost/cb"], "directAccessGrantsEnabled": True}).expect(201)
+user_id = kc.post(f"{A}/users", json={"username": "joe", "enabled": True, "email": "joe@example.com",
+    "firstName": "Joe", "lastName": "Average",
+    "credentials": [{"type": "password", "value": "joe", "temporary": False}]}).expect(201).id
+t = kc.post(f"{T}/token", data={"grant_type": "password", "username": "joe", "password": "joe", **c})
+decode(t)                                          # claims of the access token
+b = SimpleBrowser(kc)
+b.authorize(realm, "example-client", secret="example-secret")   # <Page login-login 200 ...>
+b.submit(username="joe", password="joe")           # <Callback http://localhost/cb {... 'code': ...}>
+b.tokens()
+EOF
+```
+
+Responses never raise on 4xx/5xx; their `repr` shows status, path and the start of the body. Check setup steps with `.expect(...)` so that a failed step stops there. After editing `kc_driver.py`, load it again with `pysess exec kc <file>` and create the objects again.
+
+Read before writing code for:
+- Realms, users, roles, groups, clients, client scopes, token grants, introspection, logout, UMA, events, token lifespan / not-before / brute force tests, several nodes: [references/rest-api.md](./references/rest-api.md)
+- Login pages in the browser (page ids and their fields), PKCE and authorization request tests, required and application-initiated actions, update profile, reset password, OTP and recovery codes, IdP brokering: [references/login-flows.md](./references/login-flows.md)
+- Components, LDAP federation, LDAP mappers and sync: [references/ldap.md](./references/ldap.md)
+- The Keycloak database (stored credentials and OTP secrets, local copies of LDAP users, component config, SQL run during a flow) with the psql driver [scripts/psql_driver.py](./scripts/psql_driver.py), in kind, docker compose or local PostgreSQL: [references/database.md](./references/database.md)
+
+### Gotchas
+
+- `PUT /users/{id}` replaces the user: a partial body clears `firstName`, `email` etc. Update users and components with GET, modify, PUT. Realm `PUT` merges fields, except the OTP policy.
+- A realm `PUT` with only some OTP policy fields (e.g. only `otpPolicyType`) resets the others (algorithm null, digits 0); enrolment then fails with 500 "null algorithm name". Send all `otpPolicy*` fields.
+- Users in non-master realms need `email`, `firstName`, `lastName`; otherwise login fails with `"Account is not fully set up"` (update-profile page in the browser).
+- Custom user attributes are silently dropped unless the realm user profile has `"unmanagedAttributePolicy": "ENABLED"` (or declares the attribute).
+- Every realm has built-in clients `account`, `account-console`, `admin-cli`, `broker`, `realm-management`, `security-admin-console`; creating one with these names returns 409.
+- Introspection returns `"active": false` unless the introspecting client is in the token's `aud` (add an audience mapper).
+- A token or SSO cookie from one URL is rejected on another URL of the same server (issuer check). For several nodes, use the same `url` and select the node with `connect_to`.
+- Keycloak rejects a reused OTP code. `TOTP.now()` tracks the codes it returned: keep one `TOTP` object per credential; a new one may repeat a used code.
+- The same flow shows different pages depending on state: with `prompt=login` the login form has only `password` if an SSO session exists, and `username` + `password` otherwise. Check with `b.expect(page_id)` before submitting an assumed page.
+- `b.submit(**fields)` sends the page values of fields you do not pass (an empty username is sent as empty).
+- LDAP mappers get `read.only` from `editMode` when the provider is created; switching to `WRITABLE` later does not change them, and writes stay in the Keycloak database.
+- A 401 from `userinfo` or Admin REST has an empty body.
 
 ## Kubernetes Deployment
 
@@ -963,6 +313,12 @@ kubectl create secret tls keycloak-external \
 
 # View logs
 kubectl logs statefulset/keycloak
+```
+
+### Debugging in Kind
+With `KC_DEBUG=true` in the container env, Keycloak listens for JDWP on port 8787, bound to localhost in the pod. Forward it and attach with the JDI driver from the [java-debugging skill](../java-debugging/SKILL.md):
+```bash
+runagent run -n kc0-jdwp -- kubectl port-forward pod/keycloak-0 5005:8787
 ```
 
 ### Build Custom Docker Container
@@ -1004,5 +360,4 @@ kde-open ./docs/documentation/server_admin/target/generated-docs/index.html
 - [Keycloak Documentation](https://www.keycloak.org/documentation)
 - [Server Configuration](https://www.keycloak.org/server/all-config)
 - [Keycloak Admin REST API Documentation](https://www.keycloak.org/docs-api/latest/rest-api/index.html)
-- [HTTPie Documentation](https://httpie.io/docs/cli)
 - [Quarkus Guides](https://quarkus.io/guides/)

@@ -41,7 +41,7 @@ pysess kill web
 ```
 
 ## Rules
-- Pass code to `new` or `exec` via `-c CODE`, a `FILE` path, or `stdin` (`new` with no code starts an empty session).
+- Pass code to `new` or `exec` via `-c CODE`, a `FILE` path, or `stdin` (`new` with no code starts an empty session). Use one: stdin is silently ignored if `FILE` or `-c` is given.
 - Name sessions you will come back to (`pysess new -n dbg ...`, then `pysess exec dbg ...`) instead of copying random IDs between calls.
 - Keep persistent resources (clients, connections, sockets, open files) in top-level variables instead of closing them in `with` blocks.
 - Trailing expressions auto-print (`repr()` truncated at 32 KB; full value stays in `_`; `print()` is never truncated). End a step with an assignment or `None` if you do not need its value; a trailing call such as `proc.stdin.write(...)` or `conn.send(...)` otherwise prints its return value.

@@ -1,46 +1,48 @@
 ---
 name: java-debugging
-description: "Debug and profile a running JVM: jdb breakpoints and state inspection, jcmd, jstat and JFR metrics, profiling and benchmarking."
+description: "Debug and profile a running JVM: breakpoints, state inspection, method calls, fault injection and heap references through JDI from Python; jcmd, jstat and JFR metrics, profiling and benchmarking."
 ---
 
 # Java debugging and diagnostics
 
 All tools here ship with the JDK. There are two distinct approaches:
 
-- **Interactive debugger (`jdb` over JDWP)**: Stops threads, inspects/changes state, steps, and runs code over TCP. Requires starting the JVM with `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=localhost:5005` (`suspend=y` waits before `main()`; bind `localhost`, no auth), unless a dev runner enables it (e.g., `quarkus:dev` on port 5005).
+- **Debugger (JDI over JDWP)**: Stops threads, inspects/changes state, steps, runs code, and queries the heap over TCP. Requires starting the JVM with `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=localhost:5005` (`suspend=y` waits before `main()`; bind `localhost`, no auth), unless a dev runner enables it (e.g., `quarkus:dev` on port 5005).
 - **Live observer (`jcmd`, `jstat`, `jfr` via Attach API)**: Observes without stopping threads (except full GC for heap histograms/dumps). Needs no JVM flags or restart; attaches by PID on the same host/container as the same user.
 
 - **jstat** prints counters the JVM always keeps (heap areas, GC counts and times) at an interval. It shows that something is wrong, not which code causes it.
 - **JFR** (Java Flight Recorder) records events inside the JVM to a `.jfr` file: CPU samples, allocations, lock waits, GC pauses, exceptions, I/O, with stack traces. Overhead is about 1% with `settings=default`, a few percent with `settings=profile`. `jfr view` turns the file into tables.
 
-If only the JDWP port of a JVM is reachable (no shell, no JMX), read [references/jdwp-only.md](./references/jdwp-only.md): it shows how to read heap, GC, thread and CPU numbers and change log levels through jdb.
+If only the JDWP port of a JVM is reachable (no shell, no JMX), read [references/jdwp-only.md](./references/jdwp-only.md): it shows how to read heap, GC, thread and CPU numbers and change log levels through the debugger.
 
 Find the PID with `jcmd -l` (or `jps -l`).
 In scripts, take care with `pgrep -f <name>`: it also matches the shell running the command, and two PIDs given to `jcmd` fail with `Unknown diagnostic command`.
 
 ---
 
-# Debugger (jdb)
+# Debugger (JDI from Python)
+
+[scripts/jdi_driver.py](./scripts/jdi_driver.py) uses JDI (`com.sun.jdi`), the JDK's debugger API, from Python through JPype, which runs a JVM inside the pysess process.
 
 ## Facts to know before you start
 
-- The JDWP agent accepts one debugger at a time. A second attach fails with `java.net.ConnectException: Connection refused`.
-- Attach and detach do not restart the target. Detaching (`exit`, or killing jdb) clears all breakpoints and resumes all threads.
-- On attach, jdb sets `catch uncaught java.lang.Throwable`. An uncaught exception in any thread then stops the JVM. Run `ignore uncaught java.lang.Throwable` if you do not need it.
-- `print` of a method call, and `print obj` (which calls `toString()`), runs code in the target. Call only methods without side effects.
-- Local variables need classes compiled with `-g` (Maven and Gradle do this by default). JDK classes show `No local variables`; read their fields with `dump this`.
+- The JDWP agent accepts one debugger at a time. A second attach fails with `java.net.ConnectException: Connection refused` (as does a port without an agent; check the JVM arguments with `jcmd <pid> VM.command_line`).
+- Attach and detach do not restart the target. Detaching (`j.close()`, or the end of the pysess session) clears all breakpoints and resumes all threads.
+- Method calls (`obj.toString()`, `map.get(k)`) run code in the target. Call only methods without side effects. Field reads, `repr()` of objects, `h.locals`, `o._fields()` run no code.
+- Method calls need a thread stopped by an event (a breakpoint, step, exception or watch hit). They run in that thread only, so they deadlock if the method needs a lock that another suspended thread holds. Calls time out (default 10 s, `_timeout=` to change); resume the lock holder and the call finishes.
+- Local variables need classes compiled with `-g` (Maven and Gradle do this by default). Otherwise `h.frame().args` gives the arguments by position.
 
-## Drive jdb from a persistent pysess session
+## Start a session
 
-jdb is interactive and each bash call is a new process, so run jdb inside a pysess session (see the [pysess skill](../pysess/SKILL.md)).
-Start the session with the helper [scripts/jdb_driver.py](./scripts/jdb_driver.py) loaded, then attach.
-The helper waits for the jdb prompt after each command, so commands and output stay in sync.
+Run the driver in a pysess session (see the [pysess skill](../pysess/SKILL.md)).
+The first run installs JPype (pinned in `JPYPE_REQUIREMENT`) into the shared pysess venv `java-debugging`, which needs network access and a longer timeout.
+JPype finds the JDK from `JAVA_HOME` or `java` on `PATH`; it needs a full JDK (module `jdk.jdi`).
 
 ```bash
-pysess new -n jdb <skill-dir>/scripts/jdb_driver.py
-pysess exec jdb -t 30 <<'EOF'
+pysess new -n jdi -t 120 <skill-dir>/scripts/jdi_driver.py
+pysess exec jdi -t 30 <<'EOF'
 import pysess, urllib.request, urllib.error
-j = Jdb("localhost:5005")
+j = Jdi("localhost:5005")
 def get(path):
     try:
         with urllib.request.urlopen("http://127.0.0.1:8080" + path, timeout=120) as r:
@@ -50,160 +52,152 @@ def get(path):
 EOF
 ```
 
-| Call | Does |
-|---|---|
-| `j.cmd("...")` | Send one raw jdb command, return its output. |
-| `j.bp(loc, suspend="thread")` | Set breakpoint at `C.m` or `C:line` (`suspend`: `"thread"`, `"all"`, or `"go"`). Raises `RuntimeError` if `jdb` rejects it. |
-| `j.bps()` / `j.clear(loc=None)` | List breakpoints / clear one breakpoint or all breakpoints when `loc` is omitted. |
-| `j.catch(exc, mode="caught")` / `j.ignore(...)` | Set or remove an exception breakpoint (`mode`: `"caught"`, `"uncaught"`, `"all"`). |
-| `j.watch(field, mode="write")` / `j.unwatch(...)` | Set or remove a field watchpoint (`mode`: `"write"`, `"access"`, `"all"`). |
-| `j.temp_bp(...)` / `j.temp_watch(...)` / `j.temp_catch(...)` | Context managers that always clear/unwatch/ignore on exit. |
-| `j.p("expr")` / `j.set(target, value)` | `print expr` (returns value; resumes other threads after a method call on thread-only stops, keeps suspend-all stops paused unless `release=True`) / `set target = value`. |
-| `j.wait_hit(timeout)` | Wait for the next breakpoint, watchpoint, exception or step event. Select its thread, store it in `j.thread`, return the event line. |
-| `j.cont()` / `j.resume()` | Resume the thread of the last event (`cont`) or all threads (`resume`, for suspend-all stops). |
-| `j.next()` / `j.step()` / `j.step_up()` | Step over, into, or out of a method and wait for the `Step completed` event. |
-| `j.collect(exprs, count, timeout, keep)` | Logging or conditional breakpoint: at each event evaluate `exprs` and resume, until `keep(values)` is true. `timeout` is a total deadline; returns partial rows if it expires after at least one hit. |
-| `j.inspect(depth)` | One-shot summary of current thread, locals/args, and top `depth` stack frames. |
-| `j.where(depth)` / `j.locals()` / `j.dump(expr)` / `j.list()` | Stack frames, locals/args, object fields (without calling `toString()`), and source lines (rendered multi-line in `pysess`). |
-| `j.up(n)` / `j.down(n)` | Move up/down `n` stack frames. |
-| `j.threads()` / `j.select(name)` | `{name: (id, status)}` / make a thread current. |
-| `j.release_others()` | Resume every thread except the current one. |
-| `j.field_ref(obj, "field")` | `instance of X(id=N)` for a field, from `dump`. |
-| `j.drain()` | Forget events printed so far and compact the internal buffer. |
-| `j.cleanup()` (or `with Jdb(...) as j:`) | Clear breakpoints, resume all threads, and detach safely. |
+A process can start only one JVM. After editing the driver, `j.close()` and load the file again (`pysess exec jdi <file>`); the JVM keeps running. `pysess cancel` interrupts waits and method calls; the call itself still finishes in the target.
 
-A breakpoint blocks the request that hits it, and a pysess session runs one step at a time.
-Send the request with `pysess.bg` (see the pysess skill), then call `wait_hit()`; read the response later with `.result(timeout)`.
-Give the client a timeout longer than you will spend inspecting: if it times out, the server finishes the request after resume, but the response is lost.
+## Events and hits
+
+`j.events(...)` sets event sources, optionally starts `run` in the background, and returns an `Events`.
+Each event arrives as a `Hit`: the thread stays suspended until the hit is resumed.
+Moving to the next hit (`ev.next()`, or the next loop iteration) resumes the previous one; `h.hold()` keeps it suspended.
+`ev.close()` (or the end of a `with` block) deletes the sources and resumes the current and queued hits, except held ones.
 
 ```python
-j.cmd("stop thread in com.example.OrderService.place")
-order = pysess.bg(get, "/orders/1")
-print(j.wait_hit())
-print(j.where(4))
-print(j.cmd("locals"))
-j.cmd("clear com.example.OrderService.place")
-j.cont()
-print(order.result(timeout=10))
+# scripted, one pysess step
+with j.events("com.example.OrderService.place", run=lambda: get("/orders/1")) as ev:
+    for h in ev:
+        print(h, h.stack(5, include="com.example"), h.locals)
+print(ev.result())                      # return value of run()
+
+# interactive, across pysess steps
+ev = j.events("com.example.OrderService.place", run=lambda: get("/orders/1"))
+h = ev.next()                           # step 2: h.locals, h.this, h.frame(1).locals ...
+h2 = h.step()                           # step 3: next line
+ev.close(); ev.result()
 ```
 
-## Breakpoints and other events
-
-| Command | Suspends | Notes |
-|---|---|---|
-| `stop thread in C.m` / `stop thread at C:line` | The hitting thread | Default choice. Other requests keep running. |
-| `stop go in C.m` | Nothing | Prints `Breakpoint hit` and continues. Cost about 20 µs per hit. |
-| `stop in C.m` | All threads | Other requests hang until resume. |
-| `stop <thread_id> in C.m` | All threads | Fires only for that thread. |
-| `catch caught\|uncaught\|all <Exception>` | All threads | Stops where the exception is thrown, with the throwing stack. |
-| `watch [access\|all] C.field` | All threads | Stops when the field is assigned (`all`: also read). Prints old and new value. |
-| `trace go methods` | Nothing | Prints every method entry and exit with return values. Very slow on hot code (~40 µs/event, can slow call-heavy requests by orders of magnitude). Set `exclude java.*,javax.*,jdk.*,sun.*,com.sun.*` first. |
-
-Notes:
-
-- jdb has no conditional breakpoints. Use `j.collect(...)` with a `keep` function.
-- For overloaded methods, give the signature: `stop thread in C.m(java.lang.String,int)`.
-- `clear` without arguments lists breakpoints. Watches are not listed; remove them with `unwatch`.
-- `catch` on a class that is not loaded yet is deferred and set when the class loads.
-- A watchpoint fires on assignments to the field only, not on changes inside the object it points to (for example `map.remove()`).
-- Avoid: `watch go` (prints wrong values), `trace go methods <thread_id>` (produces no output), `trace method exit` (reports a callee's exit), `monitor` (does not run for `stop thread` or `stop go` events; use `j.collect`).
-
-## Thread selection and resume pitfalls
-
-- `stop thread in` does not make the stopped thread current. Commands then fail with `No thread specified`. `j.wait_hit()` selects the thread from the event line.
-- After the breakpoint is cleared, `threads` no longer shows that thread as `at breakpoint`. Remember the thread from the event (`j.thread`).
-- `cont` answers `Nothing suspended` when only one thread is suspended and it is not current. `resume <thread_id>` always works; `j.cont()` does this.
-- Any method call in an expression (also `print obj`) leaves all threads suspended afterwards, even at a `stop thread` breakpoint: the target stops serving. It is a VM-wide suspend, so threads that start later (for example a new pool worker for the next request) also start suspended. Resuming threads one by one does not undo it; `resume` without arguments does. `j.p()` does `suspend <current>` then `resume`, so only the current thread stays stopped. `locals`, `dump` and reads of primitive or String fields and variables do not need this.
-- Method calls need a thread stopped by an event. After the `suspend` command, they fail with `Thread not suspended for method invoke`.
-- A `step` or `next` whose thread does not run (for example a parked pool thread) stays pending. It fires later, when that thread handles a request, and suspends all threads. Only detaching removes it.
-
-## Reading state
-
-- Arguments and locals by name: `locals`, `print n`. At method entry the locals list is empty; stop at a later line or use `next`.
-- Fields: `print this.field`, `print Class.staticField`, `dump obj`. Private fields and methods are accessible.
-- Method calls with arguments, also static: `print this.map.get("k").getConfig().keySet()`, `print java.lang.System.identityHashCode(obj)`.
-- Only loaded classes can be named. `print java.lang.Class.forName("java.lang.management.ManagementFactory")` loads a class so later expressions can use it.
-- Stack: `where`, `where all`, `up n`, `down n`. Lambdas and generated classes show `(null)` as the line.
-- Source: `list` shows `Source file not found` until you set the path: `use src/main/java:other/src/main/java`. `use` replaces the whole path.
-- Discovery: `classes` (all loaded classes), `methods C`, `fields C`.
-
-Expression language:
-
-| Works | Does not work |
+| `j.events(...)` argument | Meaning |
 |---|---|
-| Arithmetic, string concatenation, `?:`, comparisons | `instanceof` (`operation not yet supported`) |
-| Casts: `(java.lang.Object) x`, `(long) 3` | Class literals: `java.lang.String.class` (use `java.lang.Class.forName("...")`) |
-| `new C(args)`, chained calls | Array creation: `new String[]{"x"}`, `new int[3]` |
-| Array index and `.length`: `s.split(",")[1]` | Lambdas and method references |
-| Assignment: `print C.field = 1` (also `set`) | Varargs calls with loose arguments: `String.format("%s", "a")`, `Path.of("/a", "b")` |
-| Static calls with a fixed number of arguments: `java.util.List.of("a", "b")` | |
+| `"C.m"`, `"C.m(int,java.lang.String)"`, `"C:line"` | Breakpoints. `C.m` covers all overloads declared in `C` (not inherited ones); nested classes are `Outer$Inner`. A line without code in `C` is looked up in loaded nested classes of `C`. |
+| `catch="X"`, `caught=`, `uncaught=` | Stop where exception `X` (or a subclass) is thrown. |
+| `watch="C.f"`, `access=True` | Stop when the field is written (also read with `access`). |
+| `calls="com.example.*"` | Method entry and exit events for matching classes (`exit` hits carry the return value). Use with `thread=` and `suspend="none"`. |
+| `suspend=` | `"thread"` (default: only the hitting thread stops), `"all"` (the VM stops), `"none"` (record only). |
+| `thread=`, `instance=`, `nth=` | Report only events in this thread (name, `ThreadReference` or `Hit`), only where `this` is this object, or only the nth occurrence. |
+| `run=`, `timeout=`, `count=` | Background action; seconds `next()` waits (iteration ends when it expires, or 1 s after `run` returned); maximum hits when iterating. |
 
-For varargs, pass an array that an existing method returns: `java.lang.String.format("%s-%s", "a,b".split(","))`.
-Methods that need an `Object[]` of mixed types (for example `MBeanServer.invoke`) cannot be called.
+Classes that are not loaded yet get their sources when they load, in every classloader (`ev.pending` lists them).
+Two sources at the same location produce one hit.
+Iterating ends with the hits resumed: inspect each hit inside the loop. `list(ev)` gives resumed hits, whose `location`, `thread_name`, `kind` and `detail` stay readable.
 
-Object identity: compare the JDI object id from `dump` or `locals`, for example `HashMap(id=1504)`.
-The same id means the same object, and no code runs in the target to get it.
-The default `toString()` (`Foo@7d9864bc`) also works if the class does not override it.
-Do not use `hashCode()` of collections: it is computed from the content.
-
-## Changing the running program
-
-| Command | Effect |
+| `Hit` | Does |
 |---|---|
-| `set n = 5`, `set C.field = 1000` | Changes a local, argument or field. The program continues with the new value. |
-| `step`, `next`, `step up`, `stepi` | Step into, over, out of the method, one bytecode. `step up` does not show the return value. |
-| `pop` | Drops the current frame; the caller calls the method again, with its side effects. |
-| `redefine C /path/C.class` | Hot swap: replaces the class bytecode. Changed method bodies take effect at once. Adding a method fails: `UnsupportedOperationException: add method not implemented`. |
-| `interrupt <thread_id>` | Interrupts a thread; a waiting thread gets `InterruptedException`. |
+| `h.kind`, `h.location`, `h.class_name`, `h.method`, `h.line`, `h.thread_name`, `h.detail` | `breakpoint`, `step`, `exception`, `watch`, `access`, `enter`, `exit`; `Class.method:line`; exception and catch site, `field: old -> new`, or return value. |
+| `h.locals`, `h.this`, `h.frame(n)` | Locals and arguments of frame 0, `this`; frame `n` with `.locals`, `.this`, `.args`, `.location`, `.set(name, value)`. |
+| `h.stack(depth, include="com.example")` | Frames as `Class.method:line`, optionally only classes with a prefix. |
+| `h.exception`, `h.value` | Thrown exception; return value (`exit`) or new field value (`watch`). |
+| `h.cls("C")`, `h.cls("C")(*args)`, `h.bind(obj)` | Static fields and methods (loads the class if needed), like JPype's `JClass`; calling it creates an object; make method calls on `obj` run in this thread. |
+| `h.step("over"\|"into"\|"out")` | Resume for one line (into skips JDK classes) and return the step's hit. A step that does not complete within its timeout is cancelled. |
+| `h.force_return(value)`, `h.throw("C", "msg")` | Fault injection, see below. |
+| `h.hold()`, `h.resume()` | Keep suspended when the Events moves on or closes; resume now. |
+| `h.thread`, `h.event` | Raw JDI `ThreadReference` and `Event`. |
 
-## Locks and hangs
+| `Jdi` | Does |
+|---|---|
+| `j.threads()`, `j.thread(name)` | `{name: status}`; the `ThreadReference`. |
+| `j.classes("*Cache*")`, `j.cls("C")` | Loaded class names; static fields (no thread needed). |
+| `j.instances("C", max)`, `j.counts("C", ...)` | Live instances, live instance counts (all classloaders). No code runs; the target pauses while the heap is walked. |
+| `j.referrers(obj)`, `j.retainers(obj)` | Objects that refer to `obj`; reference chains from a static field down to `obj`. |
+| `j.redefine("C", "C.class")` | Hot swap: changed method bodies take effect at once; adding methods fails. |
+| `j.resume()`, `j.close()` | Resume all threads; detach. |
+| `j.vm`, `j.erm`, `j.wait(timeout)` | Raw `VirtualMachine` and `EventRequestManager`; hits of requests created with raw JDI. |
+| `call_tree(ev.hits)` | Indented call tree per thread from `calls=` hits. |
 
-- `suspend` stops all threads; then `threads` shows `waiting in a monitor` for blocked threads.
-- `threadlocks <thread_id>` shows owned monitors and the monitor a thread waits for.
-- `lock <expr>` (needs a thread stopped by an event) shows the owner and the waiting threads of an object's monitor.
-- `where all` dumps all stacks while suspended. Resume with `resume`.
-- Without a debugger, `jcmd <pid> Thread.print` (or `jstack <pid>`) gives all stacks with lock info and deadlock detection, without stopping anything. For contention over time, use JFR `contention-by-site`.
+## Values and method calls
 
-## Workflow: confirm which object reaches which code path
+- Values convert to Python: primitives, `str` for strings, boxed numbers unboxed, `None` for null. Other objects are `Obj`, arrays `Arr` (`len`, index, slices, iteration).
+- `o.name` reads a field; `o.name(args)` calls a method in the thread of the hit the object came from. When a field and a method have the same name (`HashMap.size`), the method wins: read the field with `o._field("size")`.
+- `o._fields()` reads all fields, `o._set(name, value)` (or `o.name = value`) assigns, `o._type` is the class name, `o._id` the object id. Equal ids mean the same object (`o1 == o2`); no code runs to get them.
+- `repr(o)` shows `<type#id>` (enums add the constant name) and runs no code; call `o.toString()` for the Java string.
+- The object model follows JPype, so JPype habits apply: `o.method(args)`, `o.field`, arrays with `len`/index/slices, `h.cls("java.util.HashMap")()` like `JClass("java.util.HashMap")()`, and JPype's casts (`JInt`, `JLong`, `JShort`, `JByte`, `JChar`, `JFloat`, `JDouble`, `JBoolean`, `JString`, loaded by the driver) to select an overload: `sb.append(JInt(1))`.
+- Arguments convert from Python: `str`, `int` (prefers `int`, then `long`), `float`, `bool`, `None`, `Obj`; numbers are boxed for `Object` parameters (a cast boxes as its type: `map.put("k", JLong(5))`). Ambiguous overloads raise `TypeError` listing the JNI signatures: cast an argument, or pass `_sig="(I)Ljava/lang/String;"`.
+- Unlike JPype, strings come back as `str` and boxed numbers as `int`/`float`/`bool`. The box type is lost: pass `JLong(v)` to give a `Long` back to Java.
+- `from java.lang import System` and `jpype.JClass(...)` are JPype's own JVM inside the debugger, not the target: `System.getProperty("user.dir")` returns the debugger's value. Reach the target only through `j` and hits (`h.cls("java.lang.System")`).
+- An exception thrown by the called method raises `JavaException` (`.type`, `.message`, `.obj`).
+- Objects returned by calls are kept from garbage collection until the hit resumes. Objects from `j.instances()` have no thread: `h.bind(o)` before calling methods.
+- Static calls: `h.cls("java.lang.System").identityHashCode(o)`. `h.cls` loads a class that is not loaded yet with `Class.forName(name, true, <system class loader>)`; classes of other classloaders must already be loaded.
 
-1. Read the source and choose methods to stop in. Instance methods of the class that holds the state let you use `this.<field>`.
-2. Bring the target into a known state (for example, invalidate a cache).
-3. Set `stop thread in` at the first method, trigger the request with `pysess.bg`, call `wait_hit()`.
-4. Record the object ids (`dump`, `locals`).
-5. `clear` that breakpoint, set the next, `j.cont()`, `wait_hit()`, compare ids.
-6. For a method that runs many times, use `j.collect(["this.id"], count=50, keep=lambda v: v[0] == '"x"')`.
-7. When done, `j.cleanup()`. Check that no jdb is left: `pgrep -af 'jdb -attach'`.
+## Workflow: which code path does a request take
+
+```python
+with j.events("com.example.Cache.get", "com.example.Db.load", run=lambda: get("/x")) as ev:
+    path = [(h.location, h.stack(4, include="com.example")) for h in ev]
+
+with j.events(calls="com.example.*", suspend="none", run=lambda: get("/x")) as ev:
+    hits = list(ev)                     # iterate: hits that were not taken are dropped on close
+print(call_tree(hits))                  # every call of com.example classes, with return values
+```
+
+Each method event crosses JDWP (about 0.5 ms per event with `suspend="none"`): narrow the class pattern, and filter by `thread=` when other requests run.
+
+## Workflow: conditional breakpoint, object identity
+
+```python
+ev = j.events("com.example.Registry.visit", run=lambda: get("/iterate"))
+h = next(h for h in ev if h.locals["e"].getKey() == "k5")      # stops at the matching hit
+cache = h.this.cache                                             # Obj; compare with == later
+ev.close()
+with j.events("com.example.Cache.put", instance=cache, run=lambda: get("/y")) as ev2:
+    print([h.locals for h in ev2])      # only puts into that cache object
+```
 
 ## Workflow: force a race
 
-Breakpoints that suspend only one thread let you choose the interleaving, instead of running many requests and hoping for a failure.
-
-1. Set `stop thread in` at a method that runs while thread A holds the shared state (for example inside an iteration loop).
-2. Trigger A with `pysess.bg`. Use `j.collect(...)` to let it run until it reaches the point you want, then `clear` the breakpoint. A stays suspended.
-3. Run the conflicting request (thread B) in the foreground. It completes while A waits.
-4. Set `catch caught <Exception>` for the failure you expect, then `j.cont()` to resume A.
-5. `j.wait_hit()` and `j.where(5)` show the stack at the throw. All threads are suspended now.
-6. `ignore caught <Exception>`, `j.cmd("resume")`, then read A's response with `a.result()`.
+Hold one thread at a chosen point, run the conflicting request, then let the first thread continue.
 
 ```python
-j.cmd("stop thread in com.example.Registry.visit")
-a = pysess.bg(get, "/iterate")
-j.collect(["e.getKey()"], count=20, keep=lambda v: v[0] == '"k5"')
-j.cmd("clear com.example.Registry.visit")
-print(get("/remove?key=k8"))
-j.cmd("catch caught java.util.ConcurrentModificationException")
-j.cont()
-print(j.wait_hit()); print(j.where(5))
-j.cmd("ignore caught java.util.ConcurrentModificationException")
-j.cmd("resume")
-print(a.result(timeout=10))
+ev = j.events("com.example.Registry.visit", run=lambda: get("/iterate"))
+a = next(h for h in ev if h.locals["e"].getKey() == "k5").hold()
+ev.close()                              # breakpoint gone, thread A stays at the hit
+print(get("/remove?key=k8"))            # thread B changes the map while A waits
+with j.events(catch="java.util.ConcurrentModificationException") as cme:
+    a.resume()
+    x = cme.next(); print(x, x.stack(5))
+print(ev.result())
 ```
+
+## Workflow: fault injection
+
+- `h.force_return(value)` makes the method of frame 0 return `value` when the thread resumes. At a method breakpoint the body does not run: `force_return(None)` for a lookup that finds nothing, `force_return(False)` for a failed check, any value of the return type.
+- `h.throw("java.io.IOException", "injected")` throws in the thread and returns the hit at the throw site. JVM side effect: delivering the exception also interrupts the thread, and code that later checks the interrupt fails too. Interruptible I/O fails, for example NIO channels close and an HTTP response is lost. Prefer `force_return` of a value that the application turns into an error.
+
+## Workflow: memory leak
+
+```python
+j.counts("byte[]", "com.example.Session")     # repeat before and after the load
+big = [b for b in j.instances("byte[]", max=20000) if len(b) == 1 << 20]
+j.retainers(big[0])
+# ['DebugTarget.retained (static) -> java.util.ArrayList.elementData -> java.lang.Object[][1] -> byte[]#3374']
+```
+
+`j.retainers` walks referrers up to `depth` levels and `width` referrers per object. Chains that do not reach a static field within the depth end with `...`. Heap queries need no stopped thread; they pause the target while they walk the heap (`instances("byte[]", max=20000)` takes about 1 s).
+
+## Locks and hangs
+
+- Without a debugger, `jcmd <pid> Thread.print` (or `jstack <pid>`) gives all stacks with lock info and deadlock detection, without stopping anything. For contention over time, use JFR `contention-by-site`.
+- With JDI, for a suspended thread (a hit, or after `j.vm.suspend()`): `t.ownedMonitors()`, `t.currentContendedMonitor()`, `t.frames()`, `m.owningThread()`, `m.waitingThreads()` on the raw `ThreadReference`/`ObjectReference`. `j.vm.resume()` afterwards.
+
+## Pitfalls
+
+- Frames change after every method call and become invalid when the thread resumes: the driver reads them on access; do not keep raw `StackFrame` objects.
+- `watch` with `suspend="none"`: the old value is read after the thread moved on and can show the new value.
+- `h.locals` at the first line of a method shows only the arguments; locals appear after they are assigned (`h.step()`).
+- A raw step request (not `h.step`) on a thread that does not run stays pending and fires later in another request.
+- Setting a local that the current expression already loaded (`visited += visit(e)` while in `visit`) has no effect on that expression.
 
 ## Recovery
 
-- Target hangs after debugging: threads are still suspended. Attach and run `resume`, or kill jdb. Detaching resumes all threads.
-- `pysess kill` stops the session; check with `pgrep -af 'jdb -attach'` that jdb is gone too.
-- `Connection refused` on attach: another debugger is attached, or the JVM has no JDWP agent (check the JVM arguments with `jcmd <pid> VM.command_line`).
+- Target hangs: threads are still suspended (held hits, or a `suspend="all"` hit). `j.resume()`, or `j.close()`; ending the pysess session also detaches.
+- `pysess kill jdi` ends the session and its JVM; the target clears all requests and resumes.
 
 ---
 
@@ -274,7 +268,7 @@ A simpler check: run `GC.class_histogram` before and after the load and compare 
 
 ## Benchmarking
 
-1. Detach jdb: breakpoints and traces make the measured code much slower. Warm up: run the load once for 10-30 s and discard the results. The JIT compiles hot code during the first seconds, so early numbers are slow and vary.
+1. Detach the debugger: breakpoints and traces make the measured code much slower. Warm up: run the load once for 10-30 s and discard the results. The JIT compiles hot code during the first seconds, so early numbers are slow and vary.
 2. Record the baseline: start JFR, run the load for a fixed duration and concurrency, save the client numbers (requests per second, p50/p95/p99 latency, errors) and `jstat -gcutil` before and after.
 3. Change one thing, repeat step 2 with the same load, compare.
 4. Repeat each run at least 3 times. Report the spread, not only one number. Do not compare runs where the machine had other load.
@@ -292,7 +286,7 @@ ab -n 1000 -c 4 "http://127.0.0.1:8080/api/items"
 
 jcmd, jstat and jfr need a shell on the host of the JVM.
 If you can run commands there (for example over ssh, or by exec into a container), run `jcmd` there and copy JFR files back.
-jdb works over any TCP path to the JDWP port, for example an ssh tunnel; see also [references/jdwp-only.md](./references/jdwp-only.md).
+The debugger works over any TCP path to the JDWP port, for example an ssh tunnel or `kubectl port-forward`; see also [references/jdwp-only.md](./references/jdwp-only.md).
 
 Without a shell on the host, use JMX. It gives heap, GC, thread and CPU metrics, runs jcmd commands (`DiagnosticCommand` MBean) and controls JFR recordings (`FlightRecorder` MBean). Clients: `jconsole`, or a small Java program.
 Turn it on with JVM startup options (or in `JAVA_TOOL_OPTIONS`):

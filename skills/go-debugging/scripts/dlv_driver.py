@@ -5,6 +5,7 @@ Delve's API v2 speaks newline-delimited JSON-RPC 1.0 over TCP, so responses are
 structured JSON rather than scraped terminal prompts.
 
 Checks (run after editing):
+    uvx ruff format --line-length 100 dlv_driver.py
     uvx ruff check --line-length 100 --select E,W,F,I,UP,B,SIM dlv_driver.py
     uvx ty check dlv_driver.py
 """
@@ -81,9 +82,9 @@ def _make_stop(st: dict[str, Any], fallback_reason: str = "stopped") -> Stop:
     gid: int = g.get("id", t.get("goroutineID", -1))
 
     loc_obj: dict[str, Any] = g.get("currentLoc") or {}
-    fn: str = (loc_obj.get("function") or {}).get("name") or (
-        t.get("function") or {}
-    ).get("name", "")
+    fn: str = (loc_obj.get("function") or {}).get("name") or (t.get("function") or {}).get(
+        "name", ""
+    )
     file_: str = loc_obj.get("file") or t.get("file", "")
     line: int = loc_obj.get("line") or t.get("line", 0)
     loc = f"{file_}:{line}" if file_ else ""
@@ -200,9 +201,7 @@ class Dlv:
     def _check_not_running(self) -> None:
         if self._cont_fut is not None:
             if not self._cont_fut.done():
-                raise RuntimeError(
-                    "target is running (resumed); call d.halt() or d.wait() first"
-                )
+                raise RuntimeError("target is running (resumed); call d.halt() or d.wait() first")
             fut = self._cont_fut
             self._cont_fut = None
             fut.result()
@@ -343,9 +342,7 @@ class Dlv:
                 timer.cancel()
 
         if timed_out.is_set() and stop.bp_id is None and not stop.exited:
-            raise TimeoutError(
-                f"cont timed out after {timeout}s (target halted at {stop.loc})"
-            )
+            raise TimeoutError(f"cont timed out after {timeout}s (target halted at {stop.loc})")
         return stop
 
     def resume(self) -> Future[Stop]:
@@ -379,9 +376,7 @@ class Dlv:
             stop = fut.result(timeout=timeout)
         except FutureTimeoutError:
             self.halt()
-            raise TimeoutError(
-                f"wait timed out after {timeout}s (target halted)"
-            ) from None
+            raise TimeoutError(f"wait timed out after {timeout}s (target halted)") from None
         self._cont_fut = None
         return stop
 
@@ -746,9 +741,7 @@ class Dlv:
         )
         return self._format_stack(res.get("Locations") or [], gid)
 
-    def _format_source(
-        self, file_path: str | None, line: int, context: int = 4
-    ) -> _Text:
+    def _format_source(self, file_path: str | None, line: int, context: int = 4) -> _Text:
         if not file_path or line <= 0:
             return _Text("")
         try:
@@ -801,15 +794,11 @@ class Dlv:
         locs: list[dict[str, Any]] = []
         if need_locs:
             req_depth = max(stack, self.frame + 1)
-            res = self.rpc(
-                "Stacktrace", {"Id": self.goroutine, "Depth": req_depth, "Full": False}
-            )
+            res = self.rpc("Stacktrace", {"Id": self.goroutine, "Depth": req_depth, "Full": False})
             locs = res.get("Locations") or []
         if source is not None and source >= 0 and self.frame < len(locs):
             loc = locs[self.frame]
-            src = self._format_source(
-                loc.get("file") or None, loc.get("line", 0), context=source
-            )
+            src = self._format_source(loc.get("file") or None, loc.get("line", 0), context=source)
             if src and not src.startswith("<source unavailable"):
                 parts.append(str(src))
         a = self.args(depth=depth)
@@ -896,9 +885,7 @@ class Dlv:
                     if rem <= 0:
                         if rows:
                             break
-                        raise TimeoutError(
-                            f"collect timed out after {timeout}s with 0 hits"
-                        )
+                        raise TimeoutError(f"collect timed out after {timeout}s with 0 hits")
                 try:
                     stop = self.cont(timeout=rem)
                 except TimeoutError:
